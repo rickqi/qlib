@@ -83,7 +83,7 @@ tar -zxvf qlib_bin.tar.gz -C C:/codes/qlib/qlib_bin --strip-components=1
 使用已训练模型对指定股票列表进行预测。
 
 ```bash
-# 预测所有 20 只目标股票 (默认 qlib_bin)
+# 预测所有 21 只目标股票 (默认 qlib_bin)
 .venv\Scripts\python.exe scripts\predict.py
 
 # 生成下一交易日预测 (5.11)
@@ -101,17 +101,20 @@ tar -zxvf qlib_bin.tar.gz -C C:/codes/qlib/qlib_bin --strip-components=1
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--data` | `qlib_bin` | 数据源（需与训练时一致） |
-| `--stocks` | 20 只预设股票 | 逗号分隔的股票列表 |
+| `--stocks` | 21 只预设股票 | 逗号分隔的股票列表 |
 | `--topk` | 0 (全部) | 只预测前 K 只 |
 | `--latest-day` | `False` | 只输出最后一天预测（即下一交易日预测） |
 
-**目标股票列表 (20 只)**:
+**目标股票列表 (21 只)**:
+
+> 股票列表由 `docs/scripts/stocks_config.py` 统一管理，增删只需修改该文件。
 
 ```
 688041.SH  688256.SH  688012.SH  603986.SH  688008.SH
 300442.SZ  603019.SH  688111.SH  002230.SZ  002837.SZ
 002049.SZ  688027.SH  300223.SZ  301269.SZ  002747.SZ
 688332.SH  002896.SZ  688568.SH  300672.SZ  300458.SZ
+688295.SH
 ```
 
 **输出**:
@@ -126,19 +129,25 @@ tar -zxvf qlib_bin.tar.gz -C C:/codes/qlib/qlib_bin --strip-components=1
 D:\codes\stock\qlib\
 ├── .venv/                    # 虚拟环境
 ├── scripts/
-│   ├── train.py              # ⭐ 模型训练脚本
-│   ├── predict.py            # ⭐ 股票预测脚本
+│   ├── train.py              # 模型训练脚本
+│   ├── predict.py            # 股票预测脚本（Qlib 纯量化）
+│   ├── predict_fused.py      # 融合预测（Qlib + AI 信号）
+│   ├── predict_price.py      # 价格预测（短周期）
+│   ├── compare_predictions.py # Qlib vs 融合对比
+│   ├── rolling_train.py      # 滚动训练
 │   ├── get_data.py           # 数据下载
 │   ├── dump_bin.py           # 数据转换
 │   └── data_collector/       # 数据采集器
-├── reports/                  # 📊 训练 & 预测输出
+├── reports/                  # 训练 & 预测输出
 │   ├── train_info.json       # 当前模型元数据
-│   ├── train_info_cn_data.json
-│   └── predictions_*.csv     # 预测结果
-├── docs/analysis/            # 📝 分析报告
-│   ├── comparison_three_sources.md    # 三数据源对比（最终版）
-│   ├── next_steps_plan.md             # 下一步执行计划
-│   └── prediction_report_*.md         # 预测报告
+│   ├── predictions_*.csv     # Qlib 预测结果
+│   ├── fused_prediction_*.csv   # 融合预测
+│   ├── qlib_only_prediction_*.csv # 纯 Qlib 基线
+│   └── price_prediction_*.csv    # 价格预测表
+├── docs/analysis/            # 分析报告
+│   ├── comparison_three_sources.md  # 三数据源对比
+│   ├── fused_prediction_*.md        # 融合预测报告
+│   └── prediction_report_*.md       # 预测报告
 ├── mlruns/                   # MLflow 实验存储
 ├── AGENTS.md                 # AI 代理指引
 └── qlib/                     # Qlib 源码（未修改）
@@ -154,7 +163,7 @@ D:\codes\stock\qlib\
 | 训练样本 | 5,753,171 | 1,944,393 | 5,636,507 | 262,980 |
 | IC | **0.051** | 0.028 | 0.124 | 0.001 |
 | ICIR | **0.758** | 0.242 | 1.897 | 0.007 |
-| 目标覆盖 | **20/20** | **20/20** | 11/20 | 11/20 |
+| 目标覆盖 | **21/21** | **21/21** | 11/21 | 11/21 |
 | 数据截止 | **2026-05-08** | **2026-05-08** | 2020-09 | 2026-05 |
 
 > 详细对比见 [`docs/analysis/comparison_three_sources.md`](docs/analysis/comparison_three_sources.md)
@@ -247,6 +256,46 @@ tar -zxvf qlib_bin.tar.gz -C ~/.qlib/qlib_data/cn_data --strip-components=2
 ```
 
 </details>
+
+---
+
+## 融合预测工作流（方案 B）
+
+将 Qlib 量化分数与 TradingAgents AI 信号后处理融合，预测 21 支股票 20 个交易日实际价格。
+
+### 一键运行
+
+```bash
+# 全流程（并行 2 组）
+python D:\codes\stock\docs\scripts\run_full_pipeline.py --parallel 2
+
+# 已有信号，仅重新预测
+python D:\codes\stock\docs\scripts\run_full_pipeline.py --skip-ta
+
+# 分析指定股票
+python D:\codes\stock\docs\scripts\run_full_pipeline.py --only 688041.SH 688256.SH
+```
+
+### 融合公式
+
+```
+combined = w_qlib × qlib_score + w_ai × ai_mapped + w_trader × ta_mapped + w_research × rr_mapped
+
+默认权重: w_qlib=0.50  w_ai=0.25  w_trader=0.10  w_research=0.15
+20天衰减: Day1=100% → Day20=12% 线性衰减
+```
+
+### 相关脚本
+
+| 脚本 | 说明 |
+|------|------|
+| `scripts/predict_fused.py` | 核心融合预测（~600 行） |
+| `scripts/predict.py` | Qlib 纯量化预测 |
+| `scripts/predict_price.py` | 短周期价格预测 |
+| `scripts/compare_predictions.py` | 对比分析 |
+| `docs/scripts/run_full_pipeline.py` | 全流程入口 |
+
+详细使用指南见 [`docs/scripts/README.md`](../../docs/scripts/README.md)
 
 ---
 

@@ -26,9 +26,9 @@ PREDICT_CONFIGS = {
         "provider_uri": "C:/codes/qlib/qlib_bin",
         "label": "qlib_bin (完整中国A股数据)",
         "check_start": "2026-04-01",
-        "check_end": "2026-05-08",
-        "predict_start": "2026-05-06",
-        "predict_end": "2026-05-08",
+        "check_end": "2026-05-11",
+        "predict_start": "2026-05-09",
+        "predict_end": "2026-05-11",
         "fit_start": "2020-01-01",
         "fit_end": "2024-12-31",
         "handler_start": "2025-10-01",
@@ -52,9 +52,9 @@ PREDICT_CONFIGS = {
         "provider_uri": "~/.qlib/qlib_data/tradingagents",
         "label": "tradingagents (自建数据)",
         "check_start": "2026-05-01",
-        "check_end": "2026-05-08",
-        "predict_start": "2026-05-06",
-        "predict_end": "2026-05-08",
+        "check_end": "2026-05-11",
+        "predict_start": "2026-05-09",
+        "predict_end": "2026-05-11",
         "fit_start": "2021-01-01",
         "fit_end": "2024-12-31",
         "handler_start": "2026-04-01",
@@ -74,13 +74,9 @@ HANDLER_MAP = {
     "alpha360": {"class": "Alpha360", "module_path": "qlib.contrib.data.handler"},
 }
 
-# 用户请求的股票列表（原始格式）
-REQUESTED_STOCKS = [
-    "688041.SH", "688256.SH", "688012.SH", "603986.SH", "688008.SH",
-    "300442.SZ", "603019.SH", "688111.SH", "002230.SZ", "002837.SZ",
-    "002049.SZ", "688027.SH", "300223.SZ", "301269.SZ", "002747.SZ",
-    "688332.SH", "002896.SZ", "688568.SH", "300672.SZ", "300458.SZ",
-]
+# Load shared stock config
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'docs' / 'scripts'))
+from stocks_config import STOCKS as REQUESTED_STOCKS
 
 
 def convert_stock_code(code: str) -> str:
@@ -123,11 +119,39 @@ def load_trained_model():
 
     from qlib.workflow import R
 
-    # 获取 recorder 并加载模型
-    recorder = R.get_recorder(
-        recorder_id=train_info["recorder_id"],
-        experiment_name=train_info["experiment_name"],
-    )
+    recorder_id = train_info["recorder_id"]
+    experiment_name = train_info.get("experiment_name")
+
+    # 尝试用 experiment_name 加载
+    try:
+        recorder = R.get_recorder(
+            recorder_id=recorder_id,
+            experiment_name=experiment_name,
+        )
+    except (ValueError, Exception):
+        # experiment_name 可能与 MLflow 不匹配，遍历所有实验查找 recorder
+        print(f"[warn] experiment_name='{experiment_name}' 未找到，遍历所有实验查找 recorder_id={recorder_id}")
+        recorder = None
+        try:
+            exp_manager = R.exp_manager
+            for exp in exp_manager.list_experiments():
+                try:
+                    r = R.get_recorder(recorder_id=recorder_id, experiment_name=exp.name)
+                    recorder = r
+                    print(f"[info] 在实验 '{exp.name}' (ID={exp.id}) 中找到 recorder")
+                    # 修复 train_info.json 中的 experiment_name
+                    train_info["experiment_name"] = exp.name
+                    break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        if recorder is None:
+            raise ValueError(
+                f"无法找到 recorder_id={recorder_id}，"
+                f"experiment_name='{experiment_name}' 无效。请检查 mlruns/ 目录。"
+            )
+
     model = recorder.load_object("params.pkl")
     return model, train_info
 
@@ -340,8 +364,22 @@ def main():
 
     cfg = PREDICT_CONFIGS[args.data]
 
+    # 确保 MLflow URI 指向项目 mlruns/ 目录（不受 CWD 影响）
+    mlruns_dir = str(Path(__file__).resolve().parent.parent / "mlruns")
+
     # 初始化
-    qlib.init(provider_uri=cfg["provider_uri"], region=REGION)
+    qlib.init(
+        provider_uri=cfg["provider_uri"],
+        region=REGION,
+        exp_manager={
+            "class": "MLflowExpManager",
+            "module_path": "qlib.workflow.expm",
+            "kwargs": {
+                "uri": f"file:{mlruns_dir}",
+                "default_exp_name": "Experiment",
+            },
+        },
+    )
 
     # 确定股票列表
     if args.stocks:

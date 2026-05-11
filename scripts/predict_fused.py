@@ -44,22 +44,9 @@ TUSHARE_TOKEN = '260264d1c42c2b5c47262478557e99d7f6a0769523ea19f48e09ed73'
 REPORTS_DIR = Path(__file__).parent.parent / 'reports'
 DOCS_DIR = Path(__file__).parent.parent / 'docs'
 
-STOCKS = [
-    "688041.SH", "688256.SH", "688012.SH", "603986.SH", "688008.SH",
-    "300442.SZ", "603019.SH", "688111.SH", "002230.SZ", "002837.SZ",
-    "002049.SZ", "688027.SH", "300223.SZ", "301269.SZ", "002747.SZ",
-    "688332.SH", "002896.SZ", "688568.SH", "300672.SZ", "300458.SZ",
-]
-
-STOCK_NAMES = {
-    "688041.SH": "海光信息", "688256.SH": "寒武纪", "688012.SH": "中微公司",
-    "603986.SH": "兆易创新", "688008.SH": "澜起科技", "300442.SZ": "普丽盛",
-    "603019.SH": "中科曙光", "688111.SH": "金山办公", "002230.SZ": "科大讯飞",
-    "002837.SZ": "英维克", "002049.SZ": "紫光国微", "688027.SH": "天合光能",
-    "300223.SZ": "北京君正", "301269.SZ": "联特科技", "002747.SZ": "尚太科技",
-    "688332.SH": "联影医疗", "002896.SZ": "星帅尔", "688568.SH": "中科星图",
-    "300672.SZ": "国科微", "300458.SZ": "全志科技",
-}
+# Load shared stock config
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'docs' / 'scripts'))
+from stocks_config import STOCKS, STOCK_NAMES
 
 # A股涨跌停限制
 DAILY_LIMIT = 0.10  # ±10%
@@ -345,7 +332,7 @@ def fuse_signals(
 
 
 def predict_prices(fused_df: pd.DataFrame, price_map: dict[str, float],
-                   days: int, decay: list[float], base_date: str = '2026-05-08') -> pd.DataFrame:
+                   days: int, decay: list[float],                    base_date: str = '2026-05-11') -> pd.DataFrame:
     """将融合分数转换为 N 天价格预测。
 
     Args:
@@ -560,7 +547,7 @@ def main():
     parser.add_argument('--weights', type=float, nargs=4, default=[0.50, 0.25, 0.10, 0.15],
                         help='融合权重 [w_qlib, w_ai, w_trader, w_research]')
     parser.add_argument('--days', type=int, default=DEFAULT_DAYS, help=f'预测天数（默认 {DEFAULT_DAYS}）')
-    parser.add_argument('--base-date', default='2026-05-08', help='基准日期（默认 2026-05-08）')
+    parser.add_argument('--base-date', default='2026-05-11', help='基准日期（默认 2026-05-11）')
     parser.add_argument('--qlib-only', action='store_true', help='仅使用 Qlib 信号（跳过 TA，用于对比基线）')
     args = parser.parse_args()
 
