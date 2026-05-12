@@ -1,17 +1,20 @@
 """
-方案 B 融合预测：Qlib 量化分数 + TradingAgents AI 信号 → 20 天价格预测。
+方案 B 三路融合预测：Qlib 量化分数 + Kronos K线预测 + TradingAgents AI 信号 → 20 天价格预测。
 
 用法:
-    # 基本用法（从已有 Qlib 预测 + TA 日志融合）
+    # 三路融合 (Qlib + Kronos + TA)
+    .venv\\Scripts\\python.exe scripts\\predict_fused.py --kronos-pred reports/kronos_predictions_xxx.csv
+
+    # 两路融合 (Qlib + TA, 无 Kronos)
     .venv\\Scripts\\python.exe scripts\\predict_fused.py
 
     # 指定 Qlib 预测文件
-    .venv\\Scripts\\python.exe scripts\\predict_fused.py --qlib-pred reports/predictions_20260511_122419.csv
+    .venv\\Scripts\\python.exe scripts\\predict_fused.py --qlib-pred reports/predictions_xxx.csv
 
     # 自定义融合权重和预测天数
-    .venv\\Scripts\\python.exe scripts\\predict_fused.py --weights 0.50 0.25 0.10 0.15 --days 20
+    .venv\\Scripts\\python.exe scripts\\predict_fused.py --weights 0.40 0.20 0.20 0.08 0.12 --days 20
 
-    # 仅 Qlib 信号（跳过 TradingAgents，用于对比基线）
+    # 仅 Qlib 信号（跳过 Kronos 和 TradingAgents，用于对比基线）
     .venv\\Scripts\\python.exe scripts\\predict_fused.py --qlib-only
 
 信号融合公式:
@@ -20,9 +23,13 @@
     ta_mapped  = trader_action × score_std × 0.5
     rr_mapped  = (research_rating / 2) × score_std
 
-    combined = w1 × qlib_score + w2 × ai_mapped + w3 × ta_mapped + w4 × rr_mapped
+    # Kronos 信号: 20天累计收益率 → 日均收益率
+    kronos_daily_ret = (kronos_D20_close / base_close - 1) / 20
+    kronos_mapped    = kronos_daily_ret  # 已在日收益率量级
 
-    默认权重: w1=0.50, w2=0.25, w3=0.10, w4=0.15
+    combined = w1 × qlib_score + w2 × kronos_mapped + w3 × ai_mapped + w4 × ta_mapped + w5 × rr_mapped
+
+    默认权重 (方案 A): w1=0.40, w2=0.20, w3=0.20, w4=0.08, w5=0.12
 """
 import argparse
 import json
@@ -209,6 +216,43 @@ def load_ta_signals(signals_dir: str | None = None) -> dict[str, dict]:
     return signals
 
 
+def load_kronos_predictions(kronos_path: str | None) -> dict[str, dict]:
+    """加载 Kronos 预测结果 CSV。
+
+    返回: {stock_code: {D1_close, D2_close, ..., D20_close, D1_return, ..., base_close}}
+    """
+    if kronos_path is None:
+        return {}
+
+    path = Path(kronos_path)
+    if not path.exists():
+        # Auto-find latest
+        kronos_files = sorted(REPORTS_DIR.glob('kronos_predictions_*.csv'))
+        if not kronos_files:
+            print(f'[WARN] 未找到 Kronos 预测文件')
+            return {}
+        path = kronos_files[-1]
+
+    print(f'加载 Kronos 预测: {path.name}')
+    df = pd.read_csv(path, encoding='utf-8-sig')
+
+    signals = {}
+    for _, row in df.iterrows():
+        stock = row['stock_code']
+        data = {'base_close': row.get('base_close', np.nan)}
+        for d in range(1, 21):
+            col = f'kronos_D{d}_close'
+            if col in row:
+                data[f'D{d}_close'] = row[col]
+            col_ret = f'kronos_D{d}_return'
+            if col_ret in row:
+                data[f'D{d}_return'] = row[col_ret]
+        signals[stock] = data
+
+    print(f'Kronos 信号: {len(signals)} 只股票')
+    return signals
+
+
 def get_actual_prices(date: str, stocks: list[str]) -> dict[str, float]:
     """从 tushare 获取指定日期的实际收盘价（不复权）。"""
     ts.set_token(TUSHARE_TOKEN)
@@ -263,24 +307,41 @@ def fuse_signals(
     ta_signals: dict[str, dict],
     weights: list[float],
     qlib_only: bool = False,
+    kronos_signals: dict[str, dict] | None = None,
 ) -> pd.DataFrame:
-    """将 Qlib 预测分数与 TradingAgents AI 信号融合。
+    """将 Qlib 预测分数、Kronos 预测与 TradingAgents AI 信号融合。
 
     融合策略:
     - Qlib score 保持原始量级（通常在 [-0.2, +0.1] 之间），作为基础日收益率预测
+    - Kronos 预测的20天收益率转换为日均收益率，直接作为日收益率信号
     - AI 信号转换为等价收益率修正量，按权重叠加
     - combined_score 的含义是 "预测日收益率"，直接用于价格预测
 
     Args:
         qlib_df: Qlib 预测结果 DataFrame，需含 stock_code, score 列
         ta_signals: {ticker: {ai_score, trader_action, research_rating, ...}}
-        weights: [w1, w2, w3, w4] 融合权重
-        qlib_only: True 时仅使用 Qlib 信号（用于对比基线）
+        weights: [w1, w2, ...] 融合权重
+            5个: [w_qlib, w_kronos, w_ai, w_trader, w_research]
+            4个: [w_qlib, w_ai, w_trader, w_research] (向后兼容，kronos=0)
+        qlib_only: True 时仅使用 Qlib 信号
+        kronos_signals: {stock_code: {D20_close, base_close, ...}}
 
     Returns:
-        DataFrame 含 qlib_score, ai_score, trader_action, research_rating, combined_score
+        DataFrame 含 qlib_score, kronos_ret, ai_score, trader_action, research_rating, combined_score
     """
-    w1, w2, w3, w4 = weights
+    # Handle weight count
+    if len(weights) == 5:
+        w1, w2, w3, w4, w5 = weights
+        has_kronos_w = True
+    elif len(weights) == 4:
+        w1, w3, w4, w5 = weights
+        w2 = 0.0  # kronos weight = 0 for legacy mode
+        has_kronos_w = False
+    else:
+        raise ValueError(f"Expected 4 or 5 weights, got {len(weights)}")
+
+    if kronos_signals is None:
+        kronos_signals = {}
 
     # 计算历史 Qlib score 的标准差，用于将 AI 信号映射到相同量级
     score_std = qlib_df['score'].std()
@@ -293,9 +354,23 @@ def fuse_signals(
         stock = row['stock_code']
         qlib_score = row['score']
 
+        # Kronos signal
+        kronos_ret = 0.0
+        if not qlib_only and stock in kronos_signals:
+            ks = kronos_signals[stock]
+            base = ks.get('base_close', 0)
+            d20 = ks.get('D20_close', 0)
+            if base > 0 and d20 > 0:
+                # 20天累计收益率 → 日均收益率
+                kronos_ret = (d20 / base - 1) / 20.0
+
         if qlib_only or stock not in ta_signals:
             # 纯 Qlib 模式或无 TA 信号
-            combined = qlib_score
+            if qlib_only:
+                combined = qlib_score
+            else:
+                # Still include Kronos if available
+                combined = w1 * qlib_score + w2 * kronos_ret
             ai_sc = 0
             ta = 0
             rr = 0
@@ -308,19 +383,18 @@ def fuse_signals(
             decision = sig['decision']
 
             # AI 信号映射到 Qlib score 的量级
-            # ai_score ∈ [-2, 2] → 映射到 [-score_std, +score_std]
             ai_mapped = ai_sc / 2.0 * score_std
-            # trader_action ∈ [-1, 1] → 映射到 [-score_std/2, +score_std/2]
             ta_mapped = ta / 1.0 * score_std * 0.5
-            # research_rating ∈ [-2, 2] → 映射到 [-score_std, +score_std]
             rr_mapped = rr / 2.0 * score_std
 
-            combined = w1 * qlib_score + w2 * ai_mapped + w3 * ta_mapped + w4 * rr_mapped
+            combined = (w1 * qlib_score + w2 * kronos_ret
+                       + w3 * ai_mapped + w4 * ta_mapped + w5 * rr_mapped)
 
         rows.append({
             'stock_code': stock,
             'name': STOCK_NAMES.get(stock, ''),
             'qlib_score': round(qlib_score, 6),
+            'kronos_ret': round(kronos_ret, 6),
             'ai_score': ai_sc,
             'trader_action': ta,
             'research_rating': rr,
@@ -361,6 +435,7 @@ def predict_prices(fused_df: pd.DataFrame, price_map: dict[str, float],
             'name': row['name'],
             'base_close': round(base_price, 2),
             'qlib_score': row['qlib_score'],
+            'kronos_ret': row.get('kronos_ret', 0.0),
             'ai_score': row['ai_score'],
             'trader_action': row['trader_action'],
             'research_rating': row['research_rating'],
@@ -406,8 +481,11 @@ def generate_report(result_df: pd.DataFrame, days: int, weights: list[float],
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / f'{mode}_prediction_{timestamp}.md'
 
-    title = '纯 Qlib 量化基线' if qlib_only else 'Qlib + TradingAgents 融合'
-    w_labels = ['w_qlib', 'w_ai_score', 'w_trader', 'w_research']
+    title = '纯 Qlib 量化基线' if qlib_only else 'Qlib + Kronos + TradingAgents 三路融合'
+    if len(weights) >= 5:
+        w_labels = ['w_qlib', 'w_kronos', 'w_ai_score', 'w_trader', 'w_research']
+    else:
+        w_labels = ['w_qlib', 'w_ai_score', 'w_trader', 'w_research']
 
     lines = [
         f'# {title}预测报告 ({days} 天)',
@@ -427,11 +505,13 @@ def generate_report(result_df: pd.DataFrame, days: int, weights: list[float],
         'ai_mapped  = (ai_score / 2) × score_std',
         'ta_mapped  = trader_action × score_std × 0.5',
         'rr_mapped  = (research_rating / 2) × score_std',
+        'kronos_mapped = (kronos_D20_return / 20) × score_std',
         '',
-        'combined = w1 × qlib_score        # 保持原始量级',
-        '         + w2 × ai_mapped          # PM 评级映射',
-        '         + w3 × ta_mapped          # Trader 行动映射',
-        '         + w4 × rr_mapped          # RM 评级映射',
+        'combined = w1 × qlib_score        # Qlib 量化分数',
+        '         + w2 × kronos_mapped     # Kronos K线预测',
+        '         + w3 × ai_mapped         # PM 评级映射',
+        '         + w4 × ta_mapped         # Trader 行动映射',
+        '         + w5 × rr_mapped         # RM 评级映射',
         '```',
         '',
         '## 预测结果',
@@ -439,16 +519,18 @@ def generate_report(result_df: pd.DataFrame, days: int, weights: list[float],
     ]
 
     # 信号概览表
-    headers = ['排名', '股票', '名称', '基准价', 'Qlib分', 'AI分', 'TA分', 'RM分', '融合分', '方向']
+    headers = ['排名', '股票', '名称', '基准价', 'Qlib分', 'Kronos', 'AI分', 'TA分', 'RM分', '融合分', '方向']
     lines.append('| ' + ' | '.join(headers) + ' |')
     lines.append('| ' + ' | '.join(['---:'] * len(headers)) + ' |')
 
     sorted_df = result_df.sort_values('combined_score', ascending=False)
     for i, (_, row) in enumerate(sorted_df.iterrows()):
         direction = '↑' if row['combined_score'] > 0.05 else ('↓' if row['combined_score'] < -0.05 else '—')
+        kronos_val = f'{row["kronos_ret"]:+.4f}' if 'kronos_ret' in row else 'N/A'
         lines.append(
             f'| {i+1} | {row["stock_code"]} | {row["name"]} | '
             f'{row["base_close"]:.2f} | {row["qlib_score"]:+.4f} | '
+            f'{kronos_val} | '
             f'{row["ai_score"]:+d} | {row["trader_action"]:+d} | '
             f'{row["research_rating"]:+d} | {row["combined_score"]:+.4f} | {direction} |'
         )
@@ -509,7 +591,7 @@ def print_summary(result_df: pd.DataFrame, days: int):
     sorted_df = result_df.sort_values('combined_score', ascending=False)
     print(f'\n{"=" * 150}')
     print(f'  20 只股票 {days} 天融合预测')
-    print(f'  融合 = w1×Qlib + w2×ai_score + w3×trader_action + w4×research_rating')
+    print(f'  融合 = w1×Qlib + w2×Kronos + w3×ai_score + w4×trader_action + w5×research_rating')
     print(f'{"=" * 150}')
 
     header = f'{"#":>2} {"股票":>12} {"名称":>6} {"基准":>8} {"Qlib":>8} {"AI":>3} {"TA":>3} {"RM":>3} {"融合":>7}'
@@ -541,21 +623,26 @@ def print_summary(result_df: pd.DataFrame, days: int):
 # ── 主流程 ────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description='方案 B 融合预测: Qlib + TradingAgents → N天价格')
+    parser = argparse.ArgumentParser(description='方案 B 三路融合预测: Qlib + Kronos + TradingAgents → N天价格')
     parser.add_argument('--qlib-pred', default=None, help='Qlib 预测 CSV 路径（默认自动查找最新）')
+    parser.add_argument('--kronos-pred', default=None, help='Kronos 预测 CSV 路径（默认自动查找最新）')
     parser.add_argument('--signals-dir', default=None, help='TradingAgents 日志目录（默认 ~/.tradingagents/logs）')
-    parser.add_argument('--weights', type=float, nargs=4, default=[0.50, 0.25, 0.10, 0.15],
-                        help='融合权重 [w_qlib, w_ai, w_trader, w_research]')
+    parser.add_argument('--weights', type=float, nargs='+', default=[0.40, 0.20, 0.20, 0.08, 0.12],
+                        help='融合权重 [w_qlib, w_kronos, w_ai, w_trader, w_research] 或 4个旧版权重')
     parser.add_argument('--days', type=int, default=DEFAULT_DAYS, help=f'预测天数（默认 {DEFAULT_DAYS}）')
     parser.add_argument('--base-date', default='2026-05-11', help='基准日期（默认 2026-05-11）')
-    parser.add_argument('--qlib-only', action='store_true', help='仅使用 Qlib 信号（跳过 TA，用于对比基线）')
+    parser.add_argument('--qlib-only', action='store_true', help='仅使用 Qlib 信号（跳过 Kronos 和 TA）')
+    parser.add_argument('--no-kronos', action='store_true', help='跳过 Kronos 信号（向后兼容）')
     args = parser.parse_args()
 
+    # Backward compatibility: --no-kronos disables kronos
+    use_kronos = not args.qlib_only and not args.no_kronos
+
     print(f'{"=" * 60}')
-    print(f'方案 B 融合预测')
+    print(f'方案 B 三路融合预测')
     print(f'  预测天数: {args.days}')
     print(f'  融合权重: {[f"{w:.2f}" for w in args.weights]}')
-    print(f'  模式: {"纯 Qlib 基线" if args.qlib_only else "Qlib + TA 融合"}')
+    print(f'  模式: {"纯 Qlib 基线" if args.qlib_only else "Qlib + Kronos + TA 三路融合" if use_kronos else "Qlib + TA 两路融合"}')
     print(f'{"=" * 60}')
 
     # 1. 加载 Qlib 预测分数
@@ -568,7 +655,15 @@ def main():
         qlib_df = qlib_df[qlib_df['datetime'] == latest].copy()
         print(f'筛选至最新日期: {latest}')
 
-    # 2. 加载 TradingAgents AI 信号
+    # 2. 加载 Kronos 预测
+    if use_kronos:
+        kronos_signals = load_kronos_predictions(args.kronos_pred)
+    else:
+        kronos_signals = {}
+        if not args.qlib_only:
+            print('[no-kronos] 跳过 Kronos 信号')
+
+    # 3. 加载 TradingAgents AI 信号
     if args.qlib_only:
         ta_signals = {}
         print('[qlib-only] 跳过 TradingAgents 信号')
@@ -580,8 +675,9 @@ def main():
         else:
             print('[WARN] 未找到任何 TA 信号，将退化为纯 Qlib 模式')
 
-    # 3. 融合信号
-    fused_df = fuse_signals(qlib_df, ta_signals, args.weights, qlib_only=args.qlib_only)
+    # 4. 融合信号
+    fused_df = fuse_signals(qlib_df, ta_signals, args.weights, qlib_only=args.qlib_only,
+                            kronos_signals=kronos_signals)
 
     # 4. 获取基准价格
     price_map = get_actual_prices(args.base_date, STOCKS)
