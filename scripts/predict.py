@@ -20,15 +20,30 @@ from qlib.constant import REG_CN
 from qlib.data import D
 from qlib.utils import init_instance_by_config
 
+
+def _get_calendar_latest(provider_uri):
+    """读取 calendar 最后一天作为动态 check_end / predict_end。"""
+    cal_path = Path(provider_uri) / "calendars" / "day.txt"
+    if cal_path.exists():
+        with open(cal_path, "r", encoding="utf-8") as f:
+            lines = [l.strip() for l in f if l.strip()]
+        if lines:
+            return lines[-1]
+    return "2026-05-11"  # fallback
+
+
 # ── 数据源配置 ──────────────────────────────────────────────────────
+# qlib_bin 的 check_end / predict_end 将在运行时动态覆盖
+_QLIB_BIN_LATEST = _get_calendar_latest("C:/codes/qlib/qlib_bin")
+
 PREDICT_CONFIGS = {
     "qlib_bin": {
         "provider_uri": "C:/codes/qlib/qlib_bin",
         "label": "qlib_bin (完整中国A股数据)",
         "check_start": "2026-04-01",
-        "check_end": "2026-05-11",
+        "check_end": _QLIB_BIN_LATEST,       # dynamic: calendar day.txt last line
         "predict_start": "2026-05-09",
-        "predict_end": "2026-05-11",
+        "predict_end": _QLIB_BIN_LATEST,     # dynamic: same as check_end
         "fit_start": "2020-01-01",
         "fit_end": "2024-12-31",
         "handler_start": "2025-10-01",

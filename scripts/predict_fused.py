@@ -350,9 +350,33 @@ def fuse_signals(
     print(f'Qlib score std: {score_std:.4f} (用于 AI 信号映射)')
 
     rows = []
+
+    # Build lookup from qlib_df for O(1) access
+    qlib_score_map = {}
     for _, row in qlib_df.iterrows():
-        stock = row['stock_code']
-        qlib_score = row['score']
+        qlib_score_map[row['stock_code']] = row['score']
+
+    # Determine the full set of stocks to process:
+    # all stocks from qlib_df + any STOCKS not in qlib_df (new stocks without Qlib score)
+    all_stock_codes = set(qlib_score_map.keys())
+    for s in STOCKS:
+        all_stock_codes.add(s)
+    # Also include stocks that have Kronos or TA signals but aren't in STOCKS
+    if kronos_signals:
+        all_stock_codes.update(kronos_signals.keys())
+    if ta_signals:
+        all_stock_codes.update(ta_signals.keys())
+
+    missing_qlib = [s for s in all_stock_codes if s not in qlib_score_map]
+    if missing_qlib:
+        print(f'[INFO] {len(missing_qlib)} stocks without Qlib score (qlib_score=0): {missing_qlib}')
+
+    for stock in sorted(all_stock_codes):
+        qlib_score = qlib_score_map.get(stock, 0.0)
+
+        # In qlib_only mode, skip stocks that have no Qlib score (nothing to contribute)
+        if qlib_only and stock not in qlib_score_map:
+            continue
 
         # Kronos signal
         kronos_ret = 0.0
