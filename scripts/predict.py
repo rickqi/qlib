@@ -29,7 +29,7 @@ def _get_calendar_latest(provider_uri):
             lines = [l.strip() for l in f if l.strip()]
         if lines:
             return lines[-1]
-    return "2026-05-11"  # fallback
+    return datetime.now().strftime("%Y-%m-%d")  # fallback: today's date
 
 
 # ── 数据源配置 ──────────────────────────────────────────────────────
