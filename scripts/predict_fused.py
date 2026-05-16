@@ -47,13 +47,28 @@ import pandas as pd
 import tushare as ts
 
 # ── 配置 ──────────────────────────────────────────────────────
-TUSHARE_TOKEN = '260264d1c42c2b5c47262478557e99d7f6a0769523ea19f48e09ed73'
+
+def _get_tushare_token() -> str:
+    """Get Tushare token from env var or .env file."""
+    token = os.environ.get('TUSHARE') or os.environ.get('TUSHARE_API_KEY')
+    if token:
+        return token
+    for env_path in [Path(__file__).resolve().parent.parent.parent / 'TradingAgents' / '.env',
+                     Path(__file__).resolve().parent.parent.parent / 'investment_data' / '.env']:
+        if env_path.exists():
+            for line in env_path.read_text(encoding='utf-8').splitlines():
+                line = line.strip()
+                if line.startswith('TUSHARE_API_KEY=') or line.startswith('TUSHARE='):
+                    return line.split('=', 1)[1].strip()
+    return '260264d1c42c2b5c47262478557e99d7f6a0769523ea19f48e09ed73'
+
+TUSHARE_TOKEN = _get_tushare_token()
 REPORTS_DIR = Path(__file__).parent.parent / 'reports'
 DOCS_DIR = Path(__file__).parent.parent / 'docs'
 
 # Load shared stock config
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'docs' / 'scripts'))
-from stocks_config import STOCKS, STOCK_NAMES
+from stocks_config import STOCKS, STOCK_NAMES, ANALYSIS_DATE
 
 # A股涨跌停限制
 DAILY_LIMIT = 0.10  # ±10%
@@ -414,6 +429,11 @@ def fuse_signals(
             combined = (w1 * qlib_score + w2 * kronos_ret
                        + w3 * ai_mapped + w4 * ta_mapped + w5 * rr_mapped)
 
+            # Clip combined score to prevent extreme predictions
+            # (model retraining variance can produce scores >> historical range)
+            SCORE_CLIP = 0.20
+            combined = max(-SCORE_CLIP, min(SCORE_CLIP, combined))
+
         rows.append({
             'stock_code': stock,
             'name': STOCK_NAMES.get(stock, ''),
@@ -430,7 +450,7 @@ def fuse_signals(
 
 
 def predict_prices(fused_df: pd.DataFrame, price_map: dict[str, float],
-                   days: int, decay: list[float],                    base_date: str = '2026-05-11') -> pd.DataFrame:
+                   days: int, decay: list[float],                    base_date: str | None = None) -> pd.DataFrame:
     """将融合分数转换为 N 天价格预测。
 
     Args:
@@ -442,6 +462,8 @@ def predict_prices(fused_df: pd.DataFrame, price_map: dict[str, float],
     Returns:
         DataFrame 含 pred_D1~DN, ret_D1~DN 列
     """
+    if base_date is None:
+        base_date = ANALYSIS_DATE or datetime.now().strftime('%Y-%m-%d')
     trading_days = get_trading_days(base_date, days)
 
     results = []
