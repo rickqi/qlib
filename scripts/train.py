@@ -10,7 +10,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import qlib
@@ -29,7 +29,7 @@ DATA_CONFIGS = {
         "valid_start": "2025-01-01",
         "valid_end": "2025-12-31",
         "test_start": "2026-01-01",
-        "test_end": "2026-05-13",
+        "test_end": "2026-05-15",
     },
     "cn_data": {
         "provider_uri": "~/.qlib/qlib_data/cn_data",
@@ -177,6 +177,17 @@ def main():
     test_start = data_cfg["test_start"]
     test_end = data_cfg["test_end"]
 
+    # ── Fix label leakage ──────────────────────────────────────
+    # Alpha158 label = Ref($close, -2)/Ref($close, -1) - 1
+    # Last 2 training days reference validation period prices.
+    # Shift train_end back by 2 trading days (~4 calendar days).
+    LABEL_LEAK_DAYS = 2
+    train_end_dt = datetime.strptime(train_end, "%Y-%m-%d") - timedelta(days=LABEL_LEAK_DAYS * 2)
+    train_end_adj = train_end_dt.strftime("%Y-%m-%d")
+    print(f"[LEAK-FIX] train_end 调整: {train_end} → {train_end_adj} (回退 {LABEL_LEAK_DAYS} 交易日)")
+    train_end = train_end_adj
+    # ────────────────────────────────────────────────────────────
+
     print(f"{'=' * 60}")
     print(f"Qlib 训练 - {args.model} + {args.handler} (数据源: {args.data})")
     print(f"Provider: {provider_uri}")
@@ -193,43 +204,74 @@ def main():
         print("[INFO] 已启用 sequential 模式 (kernels=1, backend=sequential)")
     qlib.init(provider_uri=provider_uri, region=REGION, **init_kwargs)
 
-    # 构建模型和数据集
+    # ── Memory-aware training with auto-retry ───────────────────────
     model_config = get_model_config(args.model)
     dataset_config = get_dataset_config(data_cfg, train_end, valid_start, valid_end, test_start, test_end, handler=args.handler)
 
-    model = init_instance_by_config(model_config)
-    dataset = init_instance_by_config(dataset_config)
+    FALLBACK_MARKETS = [None, "csi800", "csi500"]  # None = original market
+    recorder = None
+    experiment_name = None
 
-    # 打印数据集概要
-    train_df = dataset.prepare("train")
-    print(f"\n训练集: {train_df.shape}")
-    print(f"特征列: {list(train_df.columns)[:5]}... (共 {len(train_df.columns)} 列)")
-
-    # 端口分析配置
-    port_config = get_port_analysis_config(test_start, test_end)
-
-    # 开始实验
-    experiment_name = f"train_{args.data}_{args.model}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    with R.start(experiment_name=experiment_name):
-        R.log_params(model=args.model, data_source=args.data, **flatten_dict({"model": model_config, "dataset": dataset_config}))
-        model.fit(dataset)
-        R.save_objects(**{"params.pkl": model})
-
-        # 信号记录
-        recorder = R.get_recorder()
-        sr = SignalRecord(model, dataset, recorder)
-        sr.generate()
-
-        # 信号分析（IC、Rank IC 等）
-        sar = SigAnaRecord(recorder)
-        sar.generate()
-
-        # 回测分析（benchmark 数据可能不存在或日历越界，跳过错误）
+    for attempt, fallback_market in enumerate(FALLBACK_MARKETS):
         try:
-            par = PortAnaRecord(recorder, port_config, "day")
-            par.generate()
-        except (ValueError, KeyError, IndexError) as e:
-            print(f"[警告] 回测跳过: {e}")
+            if attempt > 0:
+                # Retry with smaller market
+                data_cfg_fb = {**data_cfg}
+                if fallback_market:
+                    data_cfg_fb["market"] = fallback_market
+                print(f"\n[RETRY-{attempt}] 降级到 market={fallback_market or 'all'}...")
+                dataset_config = get_dataset_config(data_cfg_fb, train_end, valid_start, valid_end, test_start, test_end, handler=args.handler)
+
+            model = init_instance_by_config(model_config)
+            dataset = init_instance_by_config(dataset_config)
+
+            # Print dataset summary
+            train_df = dataset.prepare("train")
+            print(f"\n训练集: {train_df.shape}")
+            print(f"特征列: {list(train_df.columns)[:5]}... (共 {len(train_df.columns)} 列)")
+            del train_df  # Free memory before training
+
+            # Port analysis config
+            port_config = get_port_analysis_config(test_start, test_end)
+
+            # Start experiment
+            experiment_name = f"train_{args.data}_{args.model}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            with R.start(experiment_name=experiment_name):
+                R.log_params(model=args.model, data_source=args.data, **flatten_dict({"model": model_config, "dataset": dataset_config}))
+                model.fit(dataset)
+                R.save_objects(**{"params.pkl": model})
+
+                # Signal record
+                recorder = R.get_recorder()
+                sr = SignalRecord(model, dataset, recorder)
+                sr.generate()
+
+                # Signal analysis
+                sar = SigAnaRecord(recorder)
+                sar.generate()
+
+                # Backtest analysis
+                try:
+                    par = PortAnaRecord(recorder, port_config, "day")
+                    par.generate()
+                except (ValueError, KeyError, IndexError) as e:
+                    print(f"[警告] 回测跳过: {e}")
+
+            break  # Success — exit retry loop
+
+        except MemoryError:
+            if attempt < len(FALLBACK_MARKETS) - 1:
+                print(f"\n[OOM] MemoryError! 将重试 (attempt {attempt + 1}/{len(FALLBACK_MARKETS) - 1})")
+                import gc
+                gc.collect()
+            else:
+                print(f"\n[ERROR] 所有降级方案均失败。请使用 --market csi800 或 --sequential 参数。")
+                raise
+        except Exception:
+            # Non-memory errors should not trigger retry
+            raise
+    # ─────────────────────────────────────────────────────────────────
+    assert recorder is not None and experiment_name is not None, "Training failed — no recorder available"
 
     # 保存实验信息
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
