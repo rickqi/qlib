@@ -191,15 +191,6 @@ def main():
     train_end = train_end_adj
     # ────────────────────────────────────────────────────────────
 
-    print(f"{'=' * 60}")
-    print(f"Qlib 训练 - {args.model} + {args.handler} (数据源: {args.data})")
-    print(f"Market: {data_cfg.get('market', 'all')}")
-    print(f"Provider: {provider_uri}")
-    print(f"训练: {train_start} ~ {train_end}")
-    print(f"验证: {valid_start} ~ {valid_end}")
-    print(f"测试: {test_start} ~ {test_end}")
-    print(f"{'=' * 60}")
-
     # 初始化 qlib（Alpha360 在 Windows 上易 OOM，可用 --sequential 禁用并行）
     init_kwargs = {}
     if args.sequential:
@@ -210,19 +201,19 @@ def main():
 
     # ── Memory-aware training with auto-retry ───────────────────────
     model_config = get_model_config(args.model)
-    dataset_config = get_dataset_config(data_cfg, train_end, valid_start, valid_end, test_start, test_end, handler=args.handler)
 
     FALLBACK_MARKETS = [None, "csi800", "csi500", "csi300"]  # None = original market
     recorder = None
     experiment_name = None
 
     # ── Memory-aware market auto-selection ──────────────────────────
-    # If no explicit --market override, check available RAM and pick
-    # the largest market that fits.  Estimated RSS (3× raw features):
-    #   all=22GB, csi1000=10GB, csi800=7GB, csi500=6.4GB, csi300=3.4GB
+    # Observed RSS on 30GB machine (qlib_bin, Alpha158, 2020-2026):
+    #   all=26.7GB (OOM killed), csi1000=~18GB (OOM killed),
+    #   csi800=~7GB (ok), csi500=~6GB (ok), csi300=~3.5GB (ok)
+    # Thresholds include safety margin for system + other processes.
     MEMORY_THRESHOLDS = {
-        "all": 28_000, "csi1000": 14_000, "csi800": 10_000,
-        "csi500": 9_000, "csi300": 5_500,
+        "all": 32_000, "csi1000": 22_000, "csi800": 12_000,
+        "csi500": 10_000, "csi300": 6_000,
     }  # MB
 
     if args.market is None:
@@ -233,7 +224,7 @@ def main():
                         avail_mb = int(line.split()[1]) // 1024
                         break
             current = data_cfg.get("market", "all")
-            if avail_mb < MEMORY_THRESHOLDS.get(current, 24_000):
+            if avail_mb < MEMORY_THRESHOLDS.get(current, 32_000):
                 for mkt in ["csi1000", "csi800", "csi500", "csi300"]:
                     if avail_mb >= MEMORY_THRESHOLDS[mkt]:
                         print(f"\n[MEM] 可用 {avail_mb}MB < {current} 所需 {MEMORY_THRESHOLDS.get(current, '?')}MB")
@@ -247,6 +238,18 @@ def main():
         except Exception:
             pass  # /proc/meminfo not available (Windows) — skip auto-selection
     # ────────────────────────────────────────────────────────────────
+
+    # Print config AFTER memory auto-selection so market display is accurate
+    print(f"{'=' * 60}")
+    print(f"Qlib 训练 - {args.model} + {args.handler} (数据源: {args.data})")
+    print(f"Market: {data_cfg.get('market', 'all')}")
+    print(f"Provider: {provider_uri}")
+    print(f"训练: {train_start} ~ {train_end}")
+    print(f"验证: {valid_start} ~ {valid_end}")
+    print(f"测试: {test_start} ~ {test_end}")
+    print(f"{'=' * 60}")
+
+    dataset_config = get_dataset_config(data_cfg, train_end, valid_start, valid_end, test_start, test_end, handler=args.handler)
 
     for attempt, fallback_market in enumerate(FALLBACK_MARKETS):
         try:
