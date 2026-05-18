@@ -23,7 +23,7 @@ from qlib.workflow.record_temp import SignalRecord, PortAnaRecord, SigAnaRecord
 DATA_CONFIGS = {
     "qlib_bin": {
         "provider_uri": str(Path(__file__).resolve().parent.parent / "qlib_bin"),
-        "market": "all",
+        "market": "csi800",
         "train_start": "2020-01-01",
         "train_end": "2024-12-31",
         "valid_start": "2025-01-01",
@@ -109,7 +109,7 @@ def get_model_config(model_name="lgbm"):
                 "lambda_l2": 580.9768,
                 "max_depth": 8,
                 "num_leaves": 210,
-                "num_threads": 4,
+                "num_threads": 20,
             },
         }
     raise ValueError(f"Unsupported model: {model_name}")
