@@ -221,8 +221,8 @@ def main():
     # the largest market that fits.  Estimated RSS (3× raw features):
     #   all=22GB, csi1000=10GB, csi800=7GB, csi500=6.4GB, csi300=3.4GB
     MEMORY_THRESHOLDS = {
-        "all": 24_000, "csi1000": 12_000, "csi800": 9_000,
-        "csi500": 8_000, "csi300": 5_000,
+        "all": 28_000, "csi1000": 14_000, "csi800": 10_000,
+        "csi500": 9_000, "csi300": 5_500,
     }  # MB
 
     if args.market is None:
