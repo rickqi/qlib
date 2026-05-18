@@ -1,28 +1,30 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
+import logging
+
+_logger = logging.getLogger(__name__)
+
 try:
     from .catboost_model import CatBoostModel
 except ModuleNotFoundError:
     CatBoostModel = None
-    print("ModuleNotFoundError. CatBoostModel are skipped. (optional: maybe installing CatBoostModel can fix it.)")
+    _logger.debug("CatBoostModel skipped (install catboost to enable)")
 try:
     from .double_ensemble import DEnsembleModel
     from .gbdt import LGBModel
 except ModuleNotFoundError:
     DEnsembleModel, LGBModel = None, None
-    print(
-        "ModuleNotFoundError. DEnsembleModel and LGBModel are skipped. (optional: maybe installing lightgbm can fix it.)"
-    )
+    _logger.debug("DEnsembleModel and LGBModel skipped (install lightgbm to enable)")
 try:
     from .xgboost import XGBModel
 except ModuleNotFoundError:
     XGBModel = None
-    print("ModuleNotFoundError. XGBModel is skipped(optional: maybe installing xgboost can fix it).")
+    _logger.debug("XGBModel skipped (install xgboost to enable)")
 try:
     from .linear import LinearModel
 except ModuleNotFoundError:
     LinearModel = None
-    print("ModuleNotFoundError. LinearModel is skipped(optional: maybe installing scipy and sklearn can fix it).")
+    _logger.debug("LinearModel skipped (install scipy and sklearn to enable)")
 # import pytorch models
 try:
     from .pytorch_alstm import ALSTM
@@ -38,6 +40,6 @@ try:
     pytorch_classes = (ALSTM, GATs, GRU, LSTM, DNNModelPytorch, TabnetModel, SFM_Model, TCN, ADD)
 except ModuleNotFoundError:
     pytorch_classes = ()
-    print("ModuleNotFoundError.  PyTorch models are skipped (optional: maybe installing pytorch can fix it).")
+    _logger.debug("PyTorch models skipped (install torch to enable)")
 
 all_model_classes = (CatBoostModel, DEnsembleModel, LGBModel, XGBModel, LinearModel) + pytorch_classes
