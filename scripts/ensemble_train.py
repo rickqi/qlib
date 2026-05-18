@@ -26,7 +26,10 @@ from qlib.model.ens.ensemble import AverageEnsemble
 # ── 数据源配置（与 train.py 一致）──────────────────────────────────────
 DATA_CONFIGS = {
     "qlib_bin": {
-        "provider_uri": "C:/codes/qlib/qlib_bin",
+        "provider_uri": os.environ.get(
+            "QLIB_BIN_DIR",
+            str(Path(__file__).resolve().parent.parent / "qlib_bin"),
+        ),
         "market": "all",
         "train_start": "2020-01-01",
         "train_end": "2024-12-31",

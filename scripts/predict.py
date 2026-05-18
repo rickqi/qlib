@@ -34,11 +34,12 @@ def _get_calendar_latest(provider_uri):
 
 # ── 数据源配置 ──────────────────────────────────────────────────────
 # qlib_bin 的 check_end / predict_end 将在运行时动态覆盖
-_QLIB_BIN_LATEST = _get_calendar_latest("C:/codes/qlib/qlib_bin")
+_QLIB_BIN_URI = os.environ.get("QLIB_BIN_DIR", "C:/codes/qlib/qlib_bin")
+_QLIB_BIN_LATEST = _get_calendar_latest(_QLIB_BIN_URI)
 
 PREDICT_CONFIGS = {
     "qlib_bin": {
-        "provider_uri": "C:/codes/qlib/qlib_bin",
+        "provider_uri": _QLIB_BIN_URI,
         "label": "qlib_bin (完整中国A股数据)",
         "check_start": "2026-04-01",
         "check_end": _QLIB_BIN_LATEST,       # dynamic: calendar day.txt last line
