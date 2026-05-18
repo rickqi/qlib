@@ -22,7 +22,7 @@ from qlib.workflow.record_temp import SignalRecord, PortAnaRecord, SigAnaRecord
 # ── 数据源配置 ──────────────────────────────────────────────────────
 DATA_CONFIGS = {
     "qlib_bin": {
-        "provider_uri": str(Path(__file__).resolve().parent.parent / "qlib_bin"),
+        "provider_uri": "C:/codes/qlib/qlib_bin",
         "market": "csi800",
         "train_start": "2020-01-01",
         "train_end": "2024-12-31",
