@@ -294,7 +294,7 @@ def get_trading_days(base_date: str, n_days: int) -> list[str]:
 
     优先从 qlib_bin 的 day_future.txt 获取，回退到简单排除法。
     """
-    future_cal = Path("C:/codes/qlib/qlib_bin/calendars/day_future.txt")
+    future_cal = Path(__file__).resolve().parent.parent / "qlib_bin" / "calendars" / "day_future.txt"
     if future_cal.exists():
         with open(future_cal, 'r') as f:
             dates = [line.strip() for line in f if line.strip()]
@@ -316,6 +316,63 @@ def get_trading_days(base_date: str, n_days: int) -> list[str]:
 
 
 # ── 融合逻辑 ──────────────────────────────────────────────────
+
+ACCURACY_DB = Path.home() / ".tradingagents" / "accuracy.db"
+
+
+def _load_dynamic_weights(base_weights: list[float]) -> list[float]:
+    """Adjust fusion weights based on historical accuracy from accuracy_daily.
+
+    Strategy: compare dir_acc for each signal source over last N days,
+    then scale base weights by relative accuracy. Falls back to base_weights
+    if insufficient data (< 10 days).
+    """
+    if not ACCURACY_DB.exists():
+        return base_weights
+
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(ACCURACY_DB))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT trade_date, method, dir_acc, rank_ic
+            FROM accuracy_daily
+            WHERE method IN ('qlib_only', 'three_way')
+            ORDER BY trade_date DESC LIMIT 40
+        """).fetchall()
+        conn.close()
+
+        if len(rows) < 10:
+            return base_weights
+
+        qlib_acc = [r['dir_acc'] for r in rows if r['method'] == 'qlib_only' and r['dir_acc'] is not None]
+        fused_acc = [r['dir_acc'] for r in rows if r['method'] == 'three_way' and r['dir_acc'] is not None]
+
+        if not qlib_acc or not fused_acc:
+            return base_weights
+
+        avg_qlib = sum(qlib_acc) / len(qlib_acc)
+        avg_fused = sum(fused_acc) / len(fused_acc)
+
+        qlib_factor = avg_qlib / 50.0
+        ta_factor = avg_fused / 50.0 if avg_fused > avg_qlib else 0.5
+
+        w1, w2, w3, w4, w5 = base_weights
+        w1 *= qlib_factor
+        ta_boost = ta_factor
+        w3 *= ta_boost
+        w4 *= ta_boost
+        w5 *= ta_boost
+
+        total = w1 + w2 + w3 + w4 + w5
+        if total > 0:
+            w1, w2, w3, w4, w5 = [w / total for w in [w1, w2, w3, w4, w5]]
+
+        print(f'[DYNAMIC-W] qlib_acc={avg_qlib:.1f}% fused_acc={avg_fused:.1f}% → weights=[{w1:.3f},{w2:.3f},{w3:.3f},{w4:.3f},{w5:.3f}]')
+        return [w1, w2, w3, w4, w5]
+    except Exception:
+        return base_weights
+
 
 def fuse_signals(
     qlib_df: pd.DataFrame,
@@ -404,11 +461,9 @@ def fuse_signals(
                 kronos_ret = (d20 / base - 1) / 20.0
 
         if qlib_only or stock not in ta_signals:
-            # 纯 Qlib 模式或无 TA 信号
             if qlib_only:
                 combined = qlib_score
             else:
-                # Still include Kronos if available
                 combined = w1 * qlib_score + w2 * kronos_ret
             ai_sc = 0
             ta = 0
@@ -421,16 +476,23 @@ def fuse_signals(
             rr = sig['research_rating']
             decision = sig['decision']
 
-            # AI 信号映射到 Qlib score 的量级
-            ai_mapped = ai_sc / 2.0 * score_std
-            ta_mapped = ta / 1.0 * score_std * 0.5
-            rr_mapped = rr / 2.0 * score_std
+            ta_weight_sum = w3 + w4 + w5
 
-            combined = (w1 * qlib_score + w2 * kronos_ret
-                       + w3 * ai_mapped + w4 * ta_mapped + w5 * rr_mapped)
+            if ai_sc == 0 and ta == 0 and rr == 0:
+                # All TA signals are neutral (Hold) — redistribute TA weights
+                # to qlib and kronos proportionally
+                q_extra = ta_weight_sum * w1 / (w1 + w2) if (w1 + w2) > 0 else 0
+                k_extra = ta_weight_sum * w2 / (w1 + w2) if (w1 + w2) > 0 else 0
+                combined = (w1 + q_extra) * qlib_score + (w2 + k_extra) * kronos_ret
+            else:
+                # Active TA signal — boost AI mapping coefficient (2×)
+                ai_mapped = ai_sc / 2.0 * score_std * 2.0
+                ta_mapped = ta / 1.0 * score_std * 1.0
+                rr_mapped = rr / 2.0 * score_std * 2.0
 
-            # Clip combined score to prevent extreme predictions
-            # (model retraining variance can produce scores >> historical range)
+                combined = (w1 * qlib_score + w2 * kronos_ret
+                           + w3 * ai_mapped + w4 * ta_mapped + w5 * rr_mapped)
+
             SCORE_CLIP = 0.20
             combined = max(-SCORE_CLIP, min(SCORE_CLIP, combined))
 
@@ -721,8 +783,11 @@ def main():
         else:
             print('[WARN] 未找到任何 TA 信号，将退化为纯 Qlib 模式')
 
-    # 4. 融合信号
-    fused_df = fuse_signals(qlib_df, ta_signals, args.weights, qlib_only=args.qlib_only,
+    # 4. 动态权重调整（基于历史 accuracy，数据不足时用默认权重）
+    effective_weights = args.weights if args.qlib_only else _load_dynamic_weights(args.weights)
+
+    # 5. 融合信号
+    fused_df = fuse_signals(qlib_df, ta_signals, effective_weights, qlib_only=args.qlib_only,
                             kronos_signals=kronos_signals)
 
     # 4. 获取基准价格
