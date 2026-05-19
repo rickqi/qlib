@@ -60,7 +60,9 @@ def _get_tushare_token() -> str:
                 line = line.strip()
                 if line.startswith('TUSHARE_API_KEY=') or line.startswith('TUSHARE='):
                     return line.split('=', 1)[1].strip()
-    return '260264d1c42c2b5c47262478557e99d7f6a0769523ea19f48e09ed73'
+    raise RuntimeError(
+        "Tushare token not found. Set TUSHARE_API_KEY env var or add to .env file."
+    )
 
 TUSHARE_TOKEN = _get_tushare_token()
 REPORTS_DIR = Path(__file__).parent.parent / 'reports'
@@ -374,6 +376,37 @@ def _load_dynamic_weights(base_weights: list[float]) -> list[float]:
         return base_weights
 
 
+def _compute_signal_disagreement(
+    qlib_dir: int, kronos_dir: int, ai_dir: int, trader_dir: int, research_dir: int
+) -> tuple[float, int]:
+    """Compute agreement ratio among non-zero signal directions.
+
+    Args:
+        qlib_dir, kronos_dir, ai_dir, trader_dir, research_dir: each is -1, 0, or +1
+
+    Returns:
+        (agreement, majority_direction):
+            agreement: 0.0 = complete disagreement, 1.0 = full agreement
+            majority_direction: sign of the majority (-1, 0, or +1)
+    """
+    dirs = [qlib_dir, kronos_dir, ai_dir, trader_dir, research_dir]
+    non_zero = [d for d in dirs if d != 0]
+
+    if len(non_zero) == 0:
+        return 1.0, 0
+
+    if len(non_zero) == 1:
+        return 1.0, non_zero[0]
+
+    pos = sum(1 for d in non_zero if d > 0)
+    neg = sum(1 for d in non_zero if d < 0)
+    majority_count = max(pos, neg)
+    majority_dir = 1 if pos >= neg else -1
+
+    agreement = majority_count / len(non_zero)
+    return agreement, majority_dir
+
+
 def fuse_signals(
     qlib_df: pd.DataFrame,
     ta_signals: dict[str, dict],
@@ -422,6 +455,7 @@ def fuse_signals(
     print(f'Qlib score std: {score_std:.4f} (用于 AI 信号映射)')
 
     rows = []
+    adj_count = 0  # Track stocks with disagreement weight adjustment
 
     # Build lookup from qlib_df for O(1) access
     qlib_score_map = {}
@@ -478,20 +512,52 @@ def fuse_signals(
 
             ta_weight_sum = w3 + w4 + w5
 
+            # ── Signal disagreement detection ──
+            qlib_dir = 1 if qlib_score > 0 else (-1 if qlib_score < 0 else 0)
+            kronos_dir = 1 if kronos_ret > 0 else (-1 if kronos_ret < 0 else 0)
+            ai_dir = 1 if ai_sc > 0 else (-1 if ai_sc < 0 else 0)
+            trader_dir = 1 if ta > 0 else (-1 if ta < 0 else 0)
+            research_dir = 1 if rr > 0 else (-1 if rr < 0 else 0)
+
+            agreement, majority_dir = _compute_signal_disagreement(
+                qlib_dir, kronos_dir, ai_dir, trader_dir, research_dir
+            )
+
+            # Dynamic weight adjustment when disagreement is high
+            w1_use, w2_use, w3_use, w4_use, w5_use = w1, w2, w3, w4, w5
+            adjusted = False
+            if agreement < 0.6:
+                # Qlib alone is disagreeing with the majority → reduce its weight by 40%
+                if qlib_dir != 0 and qlib_dir != majority_dir:
+                    w1_adj = w1 * 0.6
+                    freed = w1 - w1_adj
+                    w1_use = w1_adj
+                    # Redistribute freed weight proportionally to other signals
+                    other_total = w2 + w3 + w4 + w5
+                    if other_total > 0:
+                        w2_use = w2 + freed * (w2 / other_total)
+                        w3_use = w3 + freed * (w3 / other_total)
+                        w4_use = w4 + freed * (w4 / other_total)
+                        w5_use = w5 + freed * (w5 / other_total)
+                    adjusted = True
+                    adj_count += 1
+                    print(f'  {stock}: signal disagreement (agreement={agreement:.0%}), '
+                          f'Qlib weight {w1:.2f}->{w1_adj:.2f}')
+
             if ai_sc == 0 and ta == 0 and rr == 0:
                 # All TA signals are neutral (Hold) — redistribute TA weights
                 # to qlib and kronos proportionally
-                q_extra = ta_weight_sum * w1 / (w1 + w2) if (w1 + w2) > 0 else 0
-                k_extra = ta_weight_sum * w2 / (w1 + w2) if (w1 + w2) > 0 else 0
-                combined = (w1 + q_extra) * qlib_score + (w2 + k_extra) * kronos_ret
+                q_extra = ta_weight_sum * w1_use / (w1_use + w2_use) if (w1_use + w2_use) > 0 else 0
+                k_extra = ta_weight_sum * w2_use / (w1_use + w2_use) if (w1_use + w2_use) > 0 else 0
+                combined = (w1_use + q_extra) * qlib_score + (w2_use + k_extra) * kronos_ret
             else:
                 # Active TA signal — boost AI mapping coefficient (2×)
                 ai_mapped = ai_sc / 2.0 * score_std * 2.0
                 ta_mapped = ta / 1.0 * score_std * 1.0
                 rr_mapped = rr / 2.0 * score_std * 2.0
 
-                combined = (w1 * qlib_score + w2 * kronos_ret
-                           + w3 * ai_mapped + w4 * ta_mapped + w5 * rr_mapped)
+                combined = (w1_use * qlib_score + w2_use * kronos_ret
+                           + w3_use * ai_mapped + w4_use * ta_mapped + w5_use * rr_mapped)
 
             SCORE_CLIP = 0.20
             combined = max(-SCORE_CLIP, min(SCORE_CLIP, combined))
@@ -507,6 +573,9 @@ def fuse_signals(
             'combined_score': round(combined, 6),
             'decision': decision if not qlib_only else 'Qlib-only',
         })
+
+    if adj_count > 0:
+        print(f'Signal disagreement: {adj_count}/{len(rows)} stocks weight-adjusted')
 
     return pd.DataFrame(rows)
 
