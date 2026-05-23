@@ -425,10 +425,35 @@ def main():
     handler = args.handler or train_info.get("handler", "alpha158")
     print(f"已加载模型: {train_info['model']} + {handler}")
 
+    # F-1.4: 动态同步 fit_end / train_seg / valid_seg 从 train_info.json
+    # 避免硬编码 "2024-12-31" 与实际 train_end 不一致
+    train_period = train_info.get("train_period", [])
+    valid_period = train_info.get("valid_period", [])
+    if len(train_period) == 2:
+        cfg["fit_end"] = train_period[1]
+        cfg["train_seg"] = train_period
+    if len(valid_period) == 2:
+        cfg["valid_seg"] = valid_period
+
     # 预测
     qlib_codes = [qc for _, qc in available]
     pred = predict_for_stocks(model, qlib_codes, cfg, handler=handler)
     print(f"预测完成，共 {len(pred) if isinstance(pred, pd.Series) else 'N/A'} 条记录")
+
+    # F-1.3: Score 健康检查 — 全正/全负时告警
+    if isinstance(pred, pd.Series) and len(pred) > 0:
+        import numpy as _np
+        _scores = pred.values
+        _pos_ratio = _np.mean(_scores > 0)
+        _neg_ratio = _np.mean(_scores < 0)
+        if _pos_ratio > 0.9:
+            print(f"\n  [WARNING] {_pos_ratio*100:.0f}% scores are POSITIVE")
+            print(f"  Model may be degraded (all bullish). Retrain: python scripts/train.py --data qlib_bin")
+        elif _neg_ratio > 0.9:
+            print(f"\n  [WARNING] {_neg_ratio*100:.0f}% scores are NEGATIVE")
+            print(f"  Model may be degraded (all bearish). Retrain: python scripts/train.py --data qlib_bin")
+        else:
+            print(f"  [OK] Score distribution: pos={_pos_ratio*100:.0f}% / neg={_neg_ratio*100:.0f}%")
 
     # 获取最近行情
     recent_data = get_recent_data(qlib_codes, days=RECENT_DAYS)

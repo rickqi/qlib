@@ -32,7 +32,7 @@ DATA_CONFIGS = {
         "valid_start": "2025-01-01",
         "valid_end": "2025-12-31",
         "test_start": "2026-01-01",
-        "test_end": "2026-05-18",
+        "test_end": "2026-05-22",
     },
     "cn_data": {
         "provider_uri": "~/.qlib/qlib_data/cn_data",
@@ -179,6 +179,15 @@ def main():
     valid_end = data_cfg["valid_end"]
     test_start = data_cfg["test_start"]
     test_end = data_cfg["test_end"]
+
+    # F-2.3: 动态 test_end — 从 qlib_bin calendar 获取最新交易日
+    # 避免硬编码 test_end 需要手动更新
+    _cal_path = Path(provider_uri) / "calendars" / "day.txt"
+    if _cal_path.exists():
+        _cal_dates = [l.strip() for l in _cal_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        if _cal_dates and _cal_dates[-1] > test_start:
+            test_end = _cal_dates[-1]
+            print(f"[AUTO] test_end 动态更新: {data_cfg['test_end']} → {test_end}")
 
     # ── Fix label leakage ──────────────────────────────────────
     # Alpha158 label = Ref($close, -2)/Ref($close, -1) - 1
