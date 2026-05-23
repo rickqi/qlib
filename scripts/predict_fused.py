@@ -763,6 +763,72 @@ def generate_report(result_df: pd.DataFrame, days: int, weights: list[float],
     return csv_path, report_path
 
 
+def _check_signal_coverage(fused_df: pd.DataFrame, qlib_only: bool) -> None:
+    """F-3.2: Check signal source coverage. Warn if any source >80% zero.
+
+    When a signal source has >80% zero values, it means that source is effectively
+    dead and the fusion is degenerate. Print a warning so the operator can investigate.
+    """
+    if qlib_only:
+        return
+
+    n = len(fused_df)
+    if n == 0:
+        return
+
+    sources = {
+        'ai_score': ('AI (ai_score)', 0),
+        'trader_action': ('Trader (trader_action)', 0),
+        'research_rating': ('Research (research_rating)', 0),
+        'kronos_ret': ('Kronos (kronos_ret)', 0.0),
+    }
+
+    any_degenerate = False
+    for col, (label, zero_val) in sources.items():
+        if col not in fused_df.columns:
+            continue
+        zero_count = (fused_df[col] == zero_val).sum()
+        zero_pct = zero_count / n
+        if zero_pct > 0.8:
+            print(f'  [WARN] {label}: {zero_pct:.0%} zero ({zero_count}/{n}) — source degenerate')
+            any_degenerate = True
+
+    if any_degenerate:
+        print('  [WARN] One or more signal sources are degenerate (>80% zero).')
+        print('  Fusion may be equivalent to Qlib-only. Check TA/Kronos pipelines.')
+
+
+def _check_flip_rate(fused_df: pd.DataFrame, qlib_only: bool) -> None:
+    """F-3.3: Check flip rate after fusion. Warn if flip rate = 0%.
+
+    Flip rate = percentage of stocks where fused direction differs from Qlib-only direction.
+    If 0%, the fusion is not adding any value (pure Qlib passthrough).
+    """
+    if qlib_only:
+        return
+
+    if 'qlib_score' not in fused_df.columns or 'combined_score' not in fused_df.columns:
+        return
+
+    n = len(fused_df)
+    if n == 0:
+        return
+
+    qlib_dir = fused_df['qlib_score'].apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+    fused_dir = fused_df['combined_score'].apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+
+    flips = (qlib_dir != fused_dir).sum()
+    flip_rate = flips / n
+
+    print(f'  Flip rate: {flip_rate:.0%} ({flips}/{n} stocks differ from Qlib direction)')
+
+    if flip_rate == 0.0:
+        print('  [WARN] Flip rate = 0%. Fusion direction is identical to Qlib.')
+        print('  Other signal sources (TA/Kronos) are not influencing the result.')
+    elif flip_rate < 0.1:
+        print(f'  [INFO] Flip rate = {flip_rate:.0%}. Fusion has limited influence.')
+
+
 def print_summary(result_df: pd.DataFrame, days: int):
     """打印摘要表格到 stdout。"""
     sorted_df = result_df.sort_values('combined_score', ascending=False)
@@ -859,7 +925,13 @@ def main():
     fused_df = fuse_signals(qlib_df, ta_signals, effective_weights, qlib_only=args.qlib_only,
                             kronos_signals=kronos_signals)
 
-    # 4. 获取基准价格
+    # 6. Post-fusion validation: signal coverage + flip rate
+    if not args.qlib_only:
+        print('\n[Signal Health Check]')
+        _check_signal_coverage(fused_df, qlib_only=args.qlib_only)
+        _check_flip_rate(fused_df, qlib_only=args.qlib_only)
+
+    # 7. 获取基准价格
     price_map = get_actual_prices(args.base_date, STOCKS)
 
     # 5. 生成衰减因子
