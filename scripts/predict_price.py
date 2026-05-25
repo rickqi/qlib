@@ -19,7 +19,39 @@ import numpy as np
 import tushare as ts
 
 # ── 配置 ──────────────────────────────────────────────────────
-TUSHARE_TOKEN = '260264d1c42c2b5c47262478557e99d7f6a0769523ea19f48e09ed73'
+
+def _get_tushare_token() -> str:
+    """从环境变量或 .env 文件获取 Tushare token。"""
+    # 1. 环境变量
+    token = os.environ.get("TUSHARE_API_KEY") or os.environ.get("TUSHARE")
+    if token:
+        return token
+    # 2. TradingAgents/.env
+    env_file = Path(__file__).resolve().parent.parent.parent / "TradingAgents" / ".env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if k.strip() in ("TUSHARE_API_KEY", "TUSHARE"):
+                return v.strip().strip("\"'")
+    # 3. investment_data/.env
+    env_file2 = Path(__file__).resolve().parent.parent.parent / "investment_data" / ".env"
+    if env_file2.exists():
+        for line in env_file2.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if k.strip() in ("TUSHARE_API_KEY", "TUSHARE"):
+                return v.strip().strip("\"'")
+    raise RuntimeError(
+        "未找到 Tushare token: 请设置 TUSHARE_API_KEY 环境变量"
+        "或在 TradingAgents/.env 中配置"
+    )
+
+TUSHARE_TOKEN = _get_tushare_token()
 REPORTS_DIR = Path(__file__).parent.parent / 'reports'
 
 # Load shared stock config
