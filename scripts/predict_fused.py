@@ -356,6 +356,13 @@ def _load_dynamic_weights(base_weights: list[float]) -> list[float]:
         avg_qlib = sum(qlib_acc) / len(qlib_acc)
         avg_fused = sum(fused_acc) / len(fused_acc)
 
+        # Guard: if both accuracies are near or below random (50%),
+        # dynamic adjustment amplifies noise rather than helping.
+        # Fall back to base_weights to avoid making things worse.
+        if avg_qlib < 55 and avg_fused < 55:
+            print(f'[DYNAMIC-W] qlib_acc={avg_qlib:.1f}% fused_acc={avg_fused:.1f}% → both < 55%, using base_weights (guard)')
+            return base_weights
+
         qlib_factor = avg_qlib / 50.0
         ta_factor = avg_fused / 50.0 if avg_fused > avg_qlib else 0.5
 
