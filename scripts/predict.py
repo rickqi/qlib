@@ -34,7 +34,7 @@ def _get_calendar_latest(provider_uri):
 
 # ── 数据源配置 ──────────────────────────────────────────────────────
 # qlib_bin 的 check_end / predict_end 将在运行时动态覆盖
-_QLIB_BIN_URI = os.environ.get("QLIB_BIN_DIR", "C:/codes/qlib/qlib_bin")
+_QLIB_BIN_URI = os.environ.get("QLIB_BIN_DIR", "/home/ubuntu/stock/qlib/qlib_bin")
 _QLIB_BIN_LATEST = _get_calendar_latest(_QLIB_BIN_URI)
 
 PREDICT_CONFIGS = {
@@ -265,7 +265,7 @@ def generate_prediction_report(predictions, available, unavailable, recent_data,
         # 从 day_future.txt 读取下一交易日
         try:
             from pathlib import Path as _P
-            future_cal_path = _P("C:/codes/qlib/qlib_bin/calendars/day_future.txt")
+            future_cal_path = _P(_QLIB_BIN_URI) / "calendars" / "day_future.txt"
             if future_cal_path.exists():
                 with open(future_cal_path, "r") as f:
                     dates = [line.strip() for line in f if line.strip()]
