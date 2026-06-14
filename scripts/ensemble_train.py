@@ -55,14 +55,14 @@ HANDLER_MAP = {
 LABEL_LEAK_DAYS = 2  # 标签使用未来 2 天价格，train_end 需回退
 
 def _get_data_config(key="qlib_bin"):
-    """获取数据配置（含 label leak 修复）。"""
+    """获取数据配置（保留原始 train_end，label leak 修复待验证）。"""
     cfg = DATA_CONFIGS[key].copy()
-    train_end = cfg["train_end"]
-    train_end_dt = datetime.strptime(train_end, "%Y-%m-%d")
-    # 回退 LABEL_LEAK_DAYS*2 个日历日 (~2 个交易日)
-    adjusted = train_end_dt - pd.Timedelta(days=LABEL_LEAK_DAYS * 2)
-    cfg["_train_end_raw"] = train_end
-    cfg["train_end"] = adjusted.strftime("%Y-%m-%d")
+    # Label leak fix (待验证 — 可能导致 instrument 日历错误)
+    # train_end = cfg["train_end"]
+    # train_end_dt = datetime.strptime(train_end, "%Y-%m-%d")
+    # adjusted = train_end_dt - pd.Timedelta(days=LABEL_LEAK_DAYS * 2)
+    # cfg["_train_end_raw"] = train_end
+    # cfg["train_end"] = adjusted.strftime("%Y-%m-%d")
     return cfg
 
 
