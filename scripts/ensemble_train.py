@@ -47,7 +47,23 @@ DOCS_DIR = Path(__file__).parent.parent / "docs"
 
 HANDLER_MAP = {
     "alpha158": {"class": "Alpha158", "module_path": "qlib.contrib.data.handler"},
+    "alpha360": {"class": "Alpha360", "module_path": "qlib.contrib.data.handler"},
 }
+
+
+# ── Label Leak Fix (from train.py) ─────────────────────────────────
+LABEL_LEAK_DAYS = 2  # 标签使用未来 2 天价格，train_end 需回退
+
+def _get_data_config(key="qlib_bin"):
+    """获取数据配置（含 label leak 修复）。"""
+    cfg = DATA_CONFIGS[key].copy()
+    train_end = cfg["train_end"]
+    train_end_dt = datetime.strptime(train_end, "%Y-%m-%d")
+    # 回退 LABEL_LEAK_DAYS*2 个日历日 (~2 个交易日)
+    adjusted = train_end_dt - pd.Timedelta(days=LABEL_LEAK_DAYS * 2)
+    cfg["_train_end_raw"] = train_end
+    cfg["train_end"] = adjusted.strftime("%Y-%m-%d")
+    return cfg
 
 
 # ── 模型配置 ──────────────────────────────────────────────────────────
@@ -88,12 +104,14 @@ def get_model_config(model_name):
             "module_path": "qlib.contrib.model.catboost_model",
             "kwargs": {
                 "loss": "RMSE",
-                "depth": 8,
-                "learning_rate": 0.2,
+                "max_depth": 6,
+                "learning_rate": 0.0421,
                 "iterations": 1000,
                 "task_type": "CPU",
-                "l2_leaf_reg": 580.9768,
+                "l2_leaf_reg": 3.0,
                 "thread_count": 20,
+                "grow_policy": "Lossguide",
+                "bootstrap_type": "Poisson",
             },
         },
     }
@@ -210,7 +228,7 @@ def main():
     args = parser.parse_args()
 
     model_names = [m.strip() for m in args.models.split(",")]
-    data_cfg = DATA_CONFIGS[args.data]
+    data_cfg = _get_data_config(args.data)
 
     print("=" * 60)
     print(f"Qlib 集成学习")
