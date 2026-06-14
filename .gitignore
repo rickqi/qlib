@@ -70,3 +70,4 @@ docs/analysis/
 
 # Dolt
 .dolt/
+catboost_info/
