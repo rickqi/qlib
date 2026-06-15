@@ -70,7 +70,7 @@ HANDLER_MAP = {
 REPORTS_DIR = Path(__file__).parent.parent / "reports"
 
 
-def get_dataset_config(data_cfg, train_end, valid_start, valid_end, test_start, test_end, handler="alpha158", label=None):
+def get_dataset_config(data_cfg, train_end, valid_start, valid_end, test_start, test_end, handler="alpha158", label=None, label_mode=None):
     """构建 Dataset 配置（Alpha158/Alpha360 Handler + DatasetH）。"""
     handler_def = HANDLER_MAP[handler]
     data_handler_config = {
@@ -80,9 +80,14 @@ def get_dataset_config(data_cfg, train_end, valid_start, valid_end, test_start, 
         "fit_end_time": train_end,
         "instruments": data_cfg.get("market", "all"),
     }
-    # Label override — CSRankNorm aligns with Top-K ranking strategy
+    # Label override
     if label:
         data_handler_config["label"] = label
+    if label_mode == "rank":
+        data_handler_config["learn_processors"] = [
+            {"class": "DropnaLabel"},
+            {"class": "CSRankNorm", "kwargs": {"fields_group": "label"}},
+        ]
     return {
         "class": "DatasetH",
         "module_path": "qlib.data.dataset",
@@ -262,17 +267,18 @@ def main():
     print(f"验证: {valid_start} ~ {valid_end}")
     print(f"测试: {test_start} ~ {test_end}")
     if args.label:
-        labels = {
-            "rank": [["CSRankNorm(Ref($close, -2)/Ref($close, -1) - 1)"], ["LABEL0"]],
-            "binary": [["Ref($close, -2)/Ref($close, -1) - 1 > 0 ? 1 : 0"], ["LABEL0"]],
-        }
-        label_config = labels.get(args.label)
-        print(f"Label: {args.label} ({label_config[0][0][:50]}...)")
+        if args.label == "binary":
+            label_config = [["Ref($close, -2)/Ref($close, -1) - 1 > 0 ? 1 : 0"], ["LABEL0"]]
+            print(f"Label: binary (涨跌分类)")
+        else:
+            label_config = None  # rank mode: same label, different processor
+            if args.label == "rank":
+                print(f"Label: rank (回归 + CSRankNorm processor)")
     else:
         label_config = None
     print(f"{'=' * 60}")
 
-    dataset_config = get_dataset_config(data_cfg, train_end, valid_start, valid_end, test_start, test_end, handler=args.handler, label=label_config)
+    dataset_config = get_dataset_config(data_cfg, train_end, valid_start, valid_end, test_start, test_end, handler=args.handler, label=label_config, label_mode=args.label)
 
     for attempt, fallback_market in enumerate(FALLBACK_MARKETS):
         try:
@@ -282,7 +288,7 @@ def main():
                 if fallback_market:
                     data_cfg_fb["market"] = fallback_market
                 print(f"\n[RETRY-{attempt}] 降级到 market={fallback_market or 'all'}...")
-                dataset_config = get_dataset_config(data_cfg_fb, train_end, valid_start, valid_end, test_start, test_end, handler=args.handler, label=label_config)
+                dataset_config = get_dataset_config(data_cfg_fb, train_end, valid_start, valid_end, test_start, test_end, handler=args.handler, label=label_config, label_mode=args.label)
 
             model = init_instance_by_config(model_config)
             dataset = init_instance_by_config(dataset_config)
