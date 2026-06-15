@@ -163,8 +163,8 @@ def main():
     parser.add_argument("--data", default="qlib_bin", choices=list(DATA_CONFIGS.keys()), help="数据源")
     parser.add_argument("--model", default="lgbm", help="模型名称 (lgbm)")
     parser.add_argument("--handler", default="alpha158", choices=list(HANDLER_MAP.keys()), help="特征处理器 (alpha158/alpha360)")
-parser.add_argument("--label", default=None, choices=["rank", "binary"],
-                    help="Label 类型: rank=CSRankNorm(横截面排名), binary=涨跌分类 (默认: 回归)")
+    parser.add_argument("--label", default=None, choices=["rank", "binary"],
+                        help="Label 类型: rank=CSRankNorm, binary=涨跌分类 (默认: 回归)")
     parser.add_argument("--market", default=None, help="覆盖市场 (all/csi300/csi500/csi800/csi1000/csiall)")
     parser.add_argument("--sequential", action="store_true", help="禁用并行处理（解决 Windows OOM 问题）")
     parser.add_argument("--train-start", default=None, help="覆盖训练起始日期（如 2023-01-01）")
