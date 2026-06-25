@@ -36,7 +36,7 @@ def check_transform_proc(proc_l, fit_start_time, fit_end_time):
 
 _DEFAULT_LEARN_PROCESSORS = [
     {"class": "DropnaLabel"},
-    {"class": "CSZScoreNorm", "kwargs": {"fields_group": "label"}},
+    {"class": "CSRankNorm", "kwargs": {"fields_group": "label"}},
 ]
 _DEFAULT_INFER_PROCESSORS = [
     {"class": "ProcessInf", "kwargs": {}},

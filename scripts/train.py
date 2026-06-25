@@ -28,11 +28,11 @@ DATA_CONFIGS = {
         ),
         "market": "all",
         "train_start": "2020-01-01",
-        "train_end": "2025-12-31",
-        "valid_start": "2026-01-01",
-        "valid_end": "2026-03-31",
-        "test_start": "2026-04-01",
-        "test_end": "2026-06-23",
+        "train_end": "2024-12-31",
+        "valid_start": "2025-01-01",
+        "valid_end": "2025-12-31",
+        "test_start": "2026-01-01",
+        "test_end": "2026-06-10",
     },
     "cn_data": {
         "provider_uri": "~/.qlib/qlib_data/cn_data",
@@ -70,7 +70,7 @@ HANDLER_MAP = {
 REPORTS_DIR = Path(__file__).parent.parent / "reports"
 
 
-def get_dataset_config(data_cfg, train_end, valid_start, valid_end, test_start, test_end, handler="alpha158", label=None, label_mode=None):
+def get_dataset_config(data_cfg, train_end, valid_start, valid_end, test_start, test_end, handler="alpha158"):
     """构建 Dataset 配置（Alpha158/Alpha360 Handler + DatasetH）。"""
     handler_def = HANDLER_MAP[handler]
     data_handler_config = {
@@ -80,14 +80,6 @@ def get_dataset_config(data_cfg, train_end, valid_start, valid_end, test_start, 
         "fit_end_time": train_end,
         "instruments": data_cfg.get("market", "all"),
     }
-    # Label override
-    if label:
-        data_handler_config["label"] = label
-    if label_mode == "rank":
-        data_handler_config["learn_processors"] = [
-            {"class": "DropnaLabel"},
-            {"class": "CSRankNorm", "kwargs": {"fields_group": "label"}},
-        ]
     return {
         "class": "DatasetH",
         "module_path": "qlib.data.dataset",
@@ -168,8 +160,6 @@ def main():
     parser.add_argument("--data", default="qlib_bin", choices=list(DATA_CONFIGS.keys()), help="数据源")
     parser.add_argument("--model", default="lgbm", help="模型名称 (lgbm)")
     parser.add_argument("--handler", default="alpha158", choices=list(HANDLER_MAP.keys()), help="特征处理器 (alpha158/alpha360)")
-    parser.add_argument("--label", default=None, choices=["rank", "binary"],
-                        help="Label 类型: rank=CSRankNorm, binary=涨跌分类 (默认: 回归)")
     parser.add_argument("--market", default=None, help="覆盖市场 (all/csi300/csi500/csi800/csi1000/csiall)")
     parser.add_argument("--sequential", action="store_true", help="禁用并行处理（解决 Windows OOM 问题）")
     parser.add_argument("--train-start", default=None, help="覆盖训练起始日期（如 2023-01-01）")
@@ -189,15 +179,6 @@ def main():
     valid_end = data_cfg["valid_end"]
     test_start = data_cfg["test_start"]
     test_end = data_cfg["test_end"]
-
-    # F-2.3: 动态 test_end — 从 qlib_bin calendar 获取最新交易日
-    # 避免硬编码 test_end 需要手动更新
-    _cal_path = Path(provider_uri) / "calendars" / "day.txt"
-    if _cal_path.exists():
-        _cal_dates = [l.strip() for l in _cal_path.read_text(encoding="utf-8").splitlines() if l.strip()]
-        if _cal_dates and _cal_dates[-1] > test_start:
-            test_end = _cal_dates[-1]
-            print(f"[AUTO] test_end 动态更新: {data_cfg['test_end']} → {test_end}")
 
     # ── Fix label leakage ──────────────────────────────────────
     # Alpha158 label = Ref($close, -2)/Ref($close, -1) - 1
@@ -266,19 +247,9 @@ def main():
     print(f"训练: {train_start} ~ {train_end}")
     print(f"验证: {valid_start} ~ {valid_end}")
     print(f"测试: {test_start} ~ {test_end}")
-    if args.label:
-        if args.label == "binary":
-            label_config = [["Ref($close, -2)/Ref($close, -1) - 1 > 0 ? 1 : 0"], ["LABEL0"]]
-            print(f"Label: binary (涨跌分类)")
-        else:
-            label_config = None  # rank mode: same label, different processor
-            if args.label == "rank":
-                print(f"Label: rank (回归 + CSRankNorm processor)")
-    else:
-        label_config = None
     print(f"{'=' * 60}")
 
-    dataset_config = get_dataset_config(data_cfg, train_end, valid_start, valid_end, test_start, test_end, handler=args.handler, label=label_config, label_mode=args.label)
+    dataset_config = get_dataset_config(data_cfg, train_end, valid_start, valid_end, test_start, test_end, handler=args.handler)
 
     for attempt, fallback_market in enumerate(FALLBACK_MARKETS):
         try:
@@ -288,7 +259,7 @@ def main():
                 if fallback_market:
                     data_cfg_fb["market"] = fallback_market
                 print(f"\n[RETRY-{attempt}] 降级到 market={fallback_market or 'all'}...")
-                dataset_config = get_dataset_config(data_cfg_fb, train_end, valid_start, valid_end, test_start, test_end, handler=args.handler, label=label_config, label_mode=args.label)
+                dataset_config = get_dataset_config(data_cfg_fb, train_end, valid_start, valid_end, test_start, test_end, handler=args.handler)
 
             model = init_instance_by_config(model_config)
             dataset = init_instance_by_config(dataset_config)
