@@ -29,7 +29,8 @@
 
     combined = w1 × qlib_score + w2 × kronos_mapped + w3 × ai_mapped + w4 × ta_mapped + w5 × rr_mapped
 
-    默认权重 (方案 A): w1=0.40, w2=0.20, w3=0.20, w4=0.08, w5=0.12
+    默认权重 (方案 A): w1=0.40, w2=0.15, w3=0.20, w4=0.08, w5=0.12, w6=0.05
+    w6 = Our GRU volatility model (low vol → high score)
 """
 import argparse
 import json
@@ -70,7 +71,7 @@ DOCS_DIR = Path(__file__).parent.parent / 'docs'
 
 # Load shared stock config
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'docs' / 'scripts'))
-from stocks_config import STOCKS, STOCK_NAMES, ANALYSIS_DATE
+from stocks_config import STOCKS, STOCK_NAMES, ANALYSIS_DATE, FUSION_WEIGHTS
 
 # A股涨跌停限制
 DAILY_LIMIT = 0.10  # ±10%
@@ -120,7 +121,39 @@ def load_qlib_predictions(pred_path: str | None) -> pd.DataFrame:
     return df
 
 
-def load_ta_signals(signals_dir: str | None = None) -> dict[str, dict]:
+def _load_gru_signals(model_path: str) -> dict[str, float]:
+    """Load our GRU volatility model and predict scores for all target stocks."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "docs" / "scripts"))
+    try:
+        from predict_our_gru import OurGRUPredictor
+    except ImportError:
+        print("[WARN] predict_our_gru.py not found, skip GRU signals")
+        return {}
+
+    pred = OurGRUPredictor(model_path)
+    scores = {}
+    for stock in STOCKS:
+        df = _fetch_stock_data(stock)
+        if df is not None and len(df) >= 60:
+            scores[stock] = pred.predict_score(df)
+    return scores
+
+
+def _fetch_stock_data(stock: str) -> pd.DataFrame | None:
+    """Fetch OHLCV data for a single stock via Tushare."""
+    try:
+        df = pro.daily(ts_code=stock, start_date='20240101', end_date=datetime.now().strftime('%Y%m%d'),
+                       fields='trade_date,open,high,low,close,vol,amount')
+        if df is None or len(df) == 0:
+            return None
+        df['trade_date'] = pd.to_datetime(df['trade_date'])
+        df = df.sort_values('trade_date').set_index('trade_date')
+        return df
+    except Exception:
+        return None
+
+
+def load_ta_signals(signals_dir: str | None = None) -> dict:
     """从 TradingAgents JSON 日志加载 AI 信号。
 
     使用内嵌的信号提取逻辑，不依赖 tradingagents 包。
@@ -383,6 +416,52 @@ def _load_dynamic_weights(base_weights: list[float]) -> list[float]:
         return base_weights
 
 
+# IC 比例加权持久化路径（由 signal_evaluator / quant_manager signal-eval 生成）
+IC_WEIGHTS_PATH = REPORTS_DIR / 'per_source_ic.json'
+
+
+def _load_ic_weights(base_weights: list[float]) -> list[float]:
+    """IC 比例加权（中金 STAR 文章基线法）：w_i = |IC_i| / Σ|IC_j|。
+
+    - 读取 signal_evaluator 持久化的 per-source IC（``qlib/reports/per_source_ic.json``）
+    - IC < 0 的源（如 Kronos IC=-0.160）权重置 0（等价项目已对 Kronos 做的处置）
+    - 文件缺失/数据不足时回退 base_weights
+
+    文件格式::
+
+        {"qlib": 0.068, "kronos": -0.160, "ai": 0.103,
+         "trader": 0.392, "research": 0.358,
+         "as_of": "2026-06-29", "window_days": 30}
+    """
+    if not IC_WEIGHTS_PATH.exists():
+        print(f'[IC-W] 未找到 {IC_WEIGHTS_PATH.name}，回退固定权重'
+              f'（请先跑 `quant_manager.py signal-eval` 生成 per-source IC）')
+        return base_weights
+    try:
+        import json
+        data = json.loads(IC_WEIGHTS_PATH.read_text(encoding='utf-8'))
+        order = ['qlib', 'kronos', 'ai', 'trader', 'research']
+        ic_map = {k: float(data[k]) for k in order if k in data}
+        if len(ic_map) < 3:
+            print(f'[IC-W] per-source IC 不足（{len(ic_map)}<3），回退固定权重')
+            return base_weights
+        # 负 IC 源置 0（信号反向不如直接弃用，与 Kronos 处置一致），正 IC 按 |IC| 比例分配
+        abs_ic = [max(0.0, ic_map.get(k, 0.0)) for k in order]
+        total = sum(abs_ic)
+        if total <= 0:
+            print('[IC-W] 所有源 IC ≤ 0，回退固定权重')
+            return base_weights
+        weights = [a / total for a in abs_ic]
+        print(f'[IC-W] IC比例加权 as_of={data.get("as_of", "?")} '
+              f'window={data.get("window_days", "?")}d '
+              f'IC={ {k: round(ic_map.get(k, 0), 3) for k in order} } '
+              f'→ weights={[round(w, 3) for w in weights]}')
+        return weights
+    except Exception as e:
+        print(f'[IC-W] 读取失败 ({e})，回退固定权重')
+        return base_weights
+
+
 def _compute_signal_disagreement(
     qlib_dir: int, kronos_dir: int, ai_dir: int, trader_dir: int, research_dir: int
 ) -> tuple[float, int]:
@@ -420,14 +499,13 @@ def fuse_signals(
     weights: list[float],
     qlib_only: bool = False,
     kronos_signals: dict[str, dict] | None = None,
+    gru_signals: dict[str, float] | None = None,
+    rank_fusion: bool = False,
 ) -> pd.DataFrame:
-    """将 Qlib 预测分数、Kronos 预测与 TradingAgents AI 信号融合。
+    """将 Qlib、Kronos 与 TradingAgents AI 信号融合（5 权重 schema）。
 
-    融合策略:
-    - Qlib score 保持原始量级（通常在 [-0.2, +0.1] 之间），作为基础日收益率预测
-    - Kronos 预测的20天收益率转换为日均收益率，直接作为日收益率信号
-    - AI 信号转换为等价收益率修正量，按权重叠加
-    - combined_score 的含义是 "预测日收益率"，直接用于价格预测
+    权重: w1=Qlib, w2=Kronos, w3=AI, w4=Trader, w5=Research
+    gru_signals 参数保留但当前 5 权重 schema 无 GRU 槽位（ gru_score 不参与组合）。
 
     Args:
         qlib_df: Qlib 预测结果 DataFrame，需含 stock_code, score 列
@@ -501,10 +579,15 @@ def fuse_signals(
                 # 20天累计收益率 → 日均收益率
                 kronos_ret = (d20 / base - 1) / 20.0
 
+        # GRU volatility signal
+        gru_score = gru_signals.get(stock, 0.0) if gru_signals else 0.0
+
         if qlib_only or stock not in ta_signals:
             if qlib_only:
                 combined = qlib_score
             else:
+                # stock 不在 ta_signals → 无 AI/Trader/Research 贡献
+                # gru_score 无独立权重槽且生产恒为 0（gru_signals 默认空），故省略
                 combined = w1 * qlib_score + w2 * kronos_ret
             ai_sc = 0
             ta = 0
@@ -558,11 +641,16 @@ def fuse_signals(
                 k_extra = ta_weight_sum * w2_use / (w1_use + w2_use) if (w1_use + w2_use) > 0 else 0
                 combined = (w1_use + q_extra) * qlib_score + (w2_use + k_extra) * kronos_ret
             else:
-                # Active TA signal — boost AI mapping coefficient (2×)
-                ai_mapped = ai_sc / 2.0 * score_std * 2.0
-                ta_mapped = ta / 1.0 * score_std * 1.0
-                rr_mapped = rr / 2.0 * score_std * 2.0
+                # Active TA signal — 统一映射公式（与文档 :30 及 signal_evaluator :435-444 一致）
+                # 修复记录（2026-06-30）:
+                #   1. 原 :598 引用未定义的 w6_use → NameError 死代码
+                #   2. 原 :597 w3_use*gru_score 槽位错配（w3=AI 权重却乘 gru_score）
+                #   3. 原 :593-595 对 AI/Research 做 2× 放大，与文档/消融公式不一致
+                ai_mapped = ai_sc / 2.0 * score_std
+                ta_mapped = ta * score_std * 0.5
+                rr_mapped = rr / 2.0 * score_std
 
+                # 5 权重 schema: w1=qlib, w2=kronos, w3=ai, w4=trader, w5=research
                 combined = (w1_use * qlib_score + w2_use * kronos_ret
                            + w3_use * ai_mapped + w4_use * ta_mapped + w5_use * rr_mapped)
 
@@ -583,6 +671,40 @@ def fuse_signals(
 
     if adj_count > 0:
         print(f'Signal disagreement: {adj_count}/{len(rows)} stocks weight-adjusted')
+
+    # ── 排名化融合（中金 STAR 的 Rank-IC 思路）─────────────────────────
+    # 各源做截面 rank→pct 并中心化到 [-0.5, 0.5]，再按权重合成。
+    # 尺度无关：只在乎相对排序，规避 score_std 归一化与 ±0.20 clip 的尺度耦合问题。
+    # 全中性（ai=ta=rr=0）与 qlib_only 股票的 TA 源 rank 置 0（不贡献虚假中位排名）。
+    if rank_fusion and not qlib_only and len(rows) >= 3:
+        df_r = pd.DataFrame(rows)
+
+        def _centered_rank(series: pd.Series, neutral_mask: pd.Series | None = None) -> pd.Series:
+            r = series.rank(pct=True) - 0.5  # 中心化到 [-0.5, 0.5]
+            if neutral_mask is not None:
+                r = r.where(~neutral_mask, 0.0)  # 全中性股票 TA 源不贡献
+            return r
+
+        ta_neutral = (df_r['ai_score'] == 0) & (df_r['trader_action'] == 0) & (df_r['research_rating'] == 0)
+        qlib_rank = _centered_rank(df_r['qlib_score'])
+        kronos_rank = _centered_rank(df_r['kronos_ret'])
+        ai_rank = _centered_rank(df_r['ai_score'], ta_neutral)
+        ta_rank = _centered_rank(df_r['trader_action'], ta_neutral)
+        rr_rank = _centered_rank(df_r['research_rating'], ta_neutral)
+
+        w1, w2, w3, w4, w5 = (weights + [0.0] * 5)[:5]
+        ranked_combined = (w1 * qlib_rank + w2 * kronos_rank
+                           + w3 * ai_rank + w4 * ta_rank + w5 * rr_rank)
+        # 归一化权重和到 1（若 weights 未归一），保持 combined 量级一致
+        wsum = w1 + w2 + w3 + w4 + w5
+        if wsum > 0:
+            ranked_combined = ranked_combined / wsum
+        df_r['combined_score'] = ranked_combined.round(6)
+        # 标记使用了排名化融合
+        df_r['decision'] = df_r['decision'].where(df_r['decision'] == 'Qlib-only',
+                                                  df_r['decision'] + ' [rank]')
+        rows = df_r.to_dict('records')
+        print(f'[RANK-FUSION] 已对 {len(rows)} 只股票做截面排名化融合（取代原始分加权）')
 
     return pd.DataFrame(rows)
 
@@ -877,16 +999,37 @@ def main():
     parser.add_argument('--qlib-pred', default=None, help='Qlib 预测 CSV 路径（默认自动查找最新）')
     parser.add_argument('--kronos-pred', default=None, help='Kronos 预测 CSV 路径（默认自动查找最新）')
     parser.add_argument('--signals-dir', default=None, help='TradingAgents 日志目录（默认 ~/.tradingagents/logs）')
-    parser.add_argument('--weights', type=float, nargs='+', default=[0.40, 0.20, 0.20, 0.08, 0.12],
-                        help='融合权重 [w_qlib, w_kronos, w_ai, w_trader, w_research] 或 4个旧版权重')
+    parser.add_argument('--weights', type=float, nargs='+',
+                        default=[FUSION_WEIGHTS['qlib'], FUSION_WEIGHTS['kronos'],
+                                 FUSION_WEIGHTS['ai_score'], FUSION_WEIGHTS['trader'],
+                                 FUSION_WEIGHTS['research']],
+                        help='融合权重 [w_qlib, w_kronos, w_ai, w_trader, w_research]（5 权重 schema）')
+    parser.add_argument('--ic-weights', action='store_true',
+                        help='用 IC 比例加权替代固定权重（中金 STAR 文章基线法 '
+                             'w_i=|IC_i|/Σ|IC_j|，负 IC 源置 0）。需先跑 signal-eval 生成 per_source_ic.json')
+    parser.add_argument('--rank-fusion', action='store_true',
+                        help='排名化融合：各源先做截面 rank→pct(0~1) 再按权重合成（中金 Rank-IC 思路）')
     parser.add_argument('--days', type=int, default=DEFAULT_DAYS, help=f'预测天数（默认 {DEFAULT_DAYS}）')
     parser.add_argument('--base-date', default='2026-05-11', help='基准日期（默认 2026-05-11）')
     parser.add_argument('--qlib-only', action='store_true', help='仅使用 Qlib 信号（跳过 Kronos 和 TA）')
     parser.add_argument('--no-kronos', action='store_true', help='跳过 Kronos 信号（向后兼容）')
+    parser.add_argument('--with-kronos', action='store_true',
+                        help='强制启用 Kronos（已下线：IC=-0.160 为唯一负贡献源，'
+                             '默认权重=0 时自动跳过以省 40s GPU）')
+    parser.add_argument('--gru-model', default=None, help='Our GRU 波动率模型路径')
     args = parser.parse_args()
 
-    # Backward compatibility: --no-kronos disables kronos
-    use_kronos = not args.qlib_only and not args.no_kronos
+    # Kronos 下线策略（2026-06-30）：IC=-0.160，FUSION_WEIGHTS kronos=0
+    # 默认跳过 Kronos 加载（省 GPU），仅当 --with-kronos 显式开启或权重>0 时才加载
+    kronos_weight = args.weights[1] if len(args.weights) > 1 else 0.0
+    use_kronos = (not args.qlib_only) and (args.with_kronos or (kronos_weight > 0 and not args.no_kronos))
+    if use_kronos and not args.with_kronos:
+        print('[Kronos] 权重>0，启用 Kronos（如需禁用请将 kronos 权重置 0 或加 --no-kronos）')
+    elif args.with_kronos:
+        print('[Kronos] --with-kronos 强制启用（注意：Kronos IC=-0.160 已确认为负贡献源）')
+    elif not args.qlib_only:
+        print('[Kronos] 已下线（IC=-0.160，权重=0）— 跳过加载以省 GPU。'
+              '如需临时启用加 --with-kronos')
 
     print(f'{"=" * 60}')
     print(f'方案 B 三路融合预测')
@@ -913,6 +1056,15 @@ def main():
         if not args.qlib_only:
             print('[no-kronos] 跳过 Kronos 信号')
 
+    # 2b. 加载 Our GRU 波动率预测 (新增)
+    gru_signals = {}
+    if args.gru_model:
+        print(f'加载 GRU 模型: {args.gru_model}')
+        gru_signals = _load_gru_signals(args.gru_model)
+        if gru_signals:
+            print(f'GRU 信号: {len(gru_signals)} 只股票')
+
+
     # 3. 加载 TradingAgents AI 信号
     if args.qlib_only:
         ta_signals = {}
@@ -925,12 +1077,18 @@ def main():
         else:
             print('[WARN] 未找到任何 TA 信号，将退化为纯 Qlib 模式')
 
-    # 4. 动态权重调整（基于历史 accuracy，数据不足时用默认权重）
-    effective_weights = args.weights if args.qlib_only else _load_dynamic_weights(args.weights)
+    # 4. 权重确定：--ic-weights（IC比例加权）> 默认动态权重 > 固定权重
+    if args.qlib_only:
+        effective_weights = args.weights
+    elif args.ic_weights:
+        effective_weights = _load_ic_weights(args.weights)
+    else:
+        effective_weights = _load_dynamic_weights(args.weights)
 
     # 5. 融合信号
     fused_df = fuse_signals(qlib_df, ta_signals, effective_weights, qlib_only=args.qlib_only,
-                            kronos_signals=kronos_signals)
+                            kronos_signals=kronos_signals, gru_signals=gru_signals,
+                            rank_fusion=args.rank_fusion)
 
     # 6. Post-fusion validation: signal coverage + flip rate
     if not args.qlib_only:
