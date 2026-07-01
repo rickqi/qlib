@@ -97,8 +97,14 @@ def get_dataset_config(data_cfg, train_end, valid_start, valid_end, test_start, 
     }
 
 
-def get_model_config(model_name="lgbm"):
-    """构建模型配置。"""
+def get_model_config(model_name="lgbm", seed: int = 42):
+    """构建模型配置。
+
+    Args:
+        seed: 随机种子（注入 LightGBM seed/feature_fraction_seed/bagging_seed/
+              data_random_seed，支持多种子平均以降低预测方差，对齐中金 STAR
+              文章"3 种子均值"方法论）。
+    """
     if model_name == "lgbm":
         return {
             "class": "LGBModel",
@@ -113,6 +119,10 @@ def get_model_config(model_name="lgbm"):
                 "max_depth": 8,
                 "num_leaves": 210,
                 "num_threads": 20,
+                "seed": seed,
+                "feature_fraction_seed": seed,
+                "bagging_seed": seed,
+                "data_random_seed": seed,
             },
         }
     raise ValueError(f"Unsupported model: {model_name}")
@@ -163,6 +173,10 @@ def main():
     parser.add_argument("--market", default=None, help="覆盖市场 (all/csi300/csi500/csi800/csi1000/csiall)")
     parser.add_argument("--sequential", action="store_true", help="禁用并行处理（解决 Windows OOM 问题）")
     parser.add_argument("--train-start", default=None, help="覆盖训练起始日期（如 2023-01-01）")
+    parser.add_argument("--seed", type=int, default=42, help="随机种子（默认 42）")
+    parser.add_argument("--seeds", type=int, default=1,
+                        help="多种子训练数量（默认 1。>1 时用 seed=[42..42+N-1] 各训一个模型，"
+                             "再用 ensemble_train.py 平均，对齐中金 STAR 文章 3 种子均值方法论）")
     args = parser.parse_args()
 
     data_cfg = DATA_CONFIGS[args.data]
@@ -200,7 +214,17 @@ def main():
     qlib.init(provider_uri=provider_uri, region=REGION, **init_kwargs)
 
     # ── Memory-aware training with auto-retry ───────────────────────
-    model_config = get_model_config(args.model)
+    model_config = get_model_config(args.model, seed=args.seed)
+
+    # 多种子训练提示（--seed 单种子；--seeds N>1 通过 N 次 invocation + ensemble_train 实现）
+    if args.seeds > 1:
+        print(f"[MULTI-SEED] 检测到 --seeds {args.seeds}。本进程训练 seed={args.seed}；")
+        print(f"  多种子平均流程：")
+        for s in range(args.seed, args.seed + args.seeds):
+            print(f"    python scripts/train.py --data {args.data} --model {args.model} "
+                  f"--handler {args.handler} --seed {s}")
+        print(f"  然后用 ensemble_train.py 平均各 recorder 预测（与 lgbm/xgb/catboost 集成同机制）")
+        print(f"  本次先训练 seed={args.seed}...\n")
 
     FALLBACK_MARKETS = [None, "csi800", "csi500", "csi300"]  # None = original market
     recorder = None
@@ -274,7 +298,7 @@ def main():
             port_config = get_port_analysis_config(test_start, test_end)
 
             # Start experiment
-            experiment_name = f"train_{args.data}_{args.model}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            experiment_name = f"train_{args.data}_{args.model}_s{args.seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             with R.start(experiment_name=experiment_name):
                 R.log_params(model=args.model, data_source=args.data, **flatten_dict({"model": model_config, "dataset": dataset_config}))
                 model.fit(dataset)
