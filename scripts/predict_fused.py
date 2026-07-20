@@ -1010,7 +1010,7 @@ def main():
     parser.add_argument('--rank-fusion', action='store_true',
                         help='排名化融合：各源先做截面 rank→pct(0~1) 再按权重合成（中金 Rank-IC 思路）')
     parser.add_argument('--days', type=int, default=DEFAULT_DAYS, help=f'预测天数（默认 {DEFAULT_DAYS}）')
-    parser.add_argument('--base-date', default='2026-05-11', help='基准日期（默认 2026-05-11）')
+    parser.add_argument('--base-date', default=None, help='基准日期（默认用 stocks_config.ANALYSIS_DATE 或当天）')
     parser.add_argument('--qlib-only', action='store_true', help='仅使用 Qlib 信号（跳过 Kronos 和 TA）')
     parser.add_argument('--no-kronos', action='store_true', help='跳过 Kronos 信号（向后兼容）')
     parser.add_argument('--with-kronos', action='store_true',
@@ -1097,19 +1097,20 @@ def main():
         _check_flip_rate(fused_df, qlib_only=args.qlib_only)
 
     # 7. 获取基准价格
-    price_map = get_actual_prices(args.base_date, STOCKS)
+    _base_date = args.base_date or ANALYSIS_DATE or datetime.now().strftime('%Y-%m-%d')
+    price_map = get_actual_prices(_base_date, STOCKS)
 
     # 5. 生成衰减因子
     decay = get_decay_factors(args.days)
 
     # 6. 预测价格
-    result_df = predict_prices(fused_df, price_map, args.days, decay, base_date=args.base_date)
+    result_df = predict_prices(fused_df, price_map, args.days, decay, base_date=_base_date)
     print(f'\n成功预测: {len(result_df)} 只股票 × {args.days} 天')
 
     # 7. 输出
     print_summary(result_df, args.days)
     csv_path, report_path = generate_report(
-        result_df, args.days, args.weights, args.base_date, args.qlib_only
+        result_df, args.days, args.weights, _base_date, args.qlib_only
     )
 
     return result_df
