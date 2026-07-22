@@ -32,7 +32,7 @@ DATA_CONFIGS = {
         "valid_start": "2026-01-01",
         "valid_end": "2026-03-31",
         "test_start": "2026-04-01",
-        "test_end": "2026-07-17",
+        "test_end": "2026-07-21",
     },
     "cn_data": {
         "provider_uri": "~/.qlib/qlib_data/cn_data",
