@@ -67,8 +67,14 @@ DAILY_LIMIT = 0.10  # ±10%
 
 
 def load_prediction_scores():
-    """加载最新的 qlib 预测分数"""
-    pred_files = sorted(REPORTS_DIR.glob('predictions_*.csv'))
+    """加载最新的 qlib 预测分数。
+
+    只匹配时间戳命名的 ``predictions_YYYYMMDD_HHMMSS.csv``（glob
+    ``predictions_[0-9]*.csv``），排除 ``predictions_test.csv`` 等非时间戳
+    文件——它们按字典序排在所有时间戳文件之后，旧 glob 会误选过期数据
+    （与 predict_fused.py 的同款修复一致）。
+    """
+    pred_files = sorted(REPORTS_DIR.glob('predictions_[0-9]*.csv'))
     if not pred_files:
         print('错误: 未找到预测文件')
         sys.exit(1)
