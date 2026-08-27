@@ -95,11 +95,15 @@ def load_qlib_predictions(pred_path: str | None) -> pd.DataFrame:
     """加载 Qlib 预测分数 CSV。
 
     如果未指定路径，自动查找 reports/ 下最新的 predictions_*.csv。
+
+    注意：只匹配时间戳命名的 ``predictions_YYYYMMDD_HHMMSS.csv``
+    （glob ``predictions_[0-9]*.csv``），排除 ``predictions_test.csv`` 等
+    非时间戳文件——它们按字典序排在所有时间戳文件之后，会被旧逻辑误选。
     """
     if pred_path:
         path = Path(pred_path)
     else:
-        pred_files = sorted(REPORTS_DIR.glob('predictions_*.csv'))
+        pred_files = sorted(REPORTS_DIR.glob('predictions_[0-9]*.csv'))
         if not pred_files:
             print('错误: 未找到 Qlib 预测文件。请先运行 predict.py')
             sys.exit(1)
