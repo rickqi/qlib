@@ -608,7 +608,13 @@ def fuse_signals(
 
             # ── Signal disagreement detection ──
             qlib_dir = 1 if qlib_score > 0 else (-1 if qlib_score < 0 else 0)
-            kronos_dir = 1 if kronos_ret > 0 else (-1 if kronos_ret < 0 else 0)
+            # 加固（2026-09-06, 编排器影子模式 P1 前置项）: 零权重信号不投票。
+            # Kronos 已消融归零（FUSION_WEIGHTS["kronos"]=0.00, 独立 IC=-0.160），
+            # 但陈旧缓存（Kronos/data 46 只 05-17 旧文件）使 kronos_ret 非零概率高——
+            # 其符号此前仍参与 agreement 投票，可拉低 agreement 触发 Qlib 动态降权 ×0.6；
+            # 且周一/非周一 TA 覆盖面不同造成口径漂移（t4 F1 审查遗留）。
+            # w2==0 时强制 kronos_dir=0（与 kronos_ret=0 同语义），零权重源不再扭曲 agreement。
+            kronos_dir = 0 if w2 == 0 else (1 if kronos_ret > 0 else (-1 if kronos_ret < 0 else 0))
             ai_dir = 1 if ai_sc > 0 else (-1 if ai_sc < 0 else 0)
             trader_dir = 1 if ta > 0 else (-1 if ta < 0 else 0)
             research_dir = 1 if rr > 0 else (-1 if rr < 0 else 0)
