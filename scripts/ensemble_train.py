@@ -241,9 +241,10 @@ def main():
     print(f"测试: {data_cfg['test_start']} ~ {data_cfg['test_end']}")
     print("=" * 60)
 
-    # 初始化 qlib（Windows multiprocessing 会触发 concurrent send_bytes bug，
-    # 设置 joblib_backend="threading" 避免）
-    qlib.init(provider_uri=data_cfg["provider_uri"], region=REGION, joblib_backend="threading")
+    # 初始化 qlib，使用默认并行后端（与 train.py 一致）。
+    # 注意：threading backend 在本系统死锁；sequential(kernels=1) 会导致
+    # Alpha360 全市场特征计算逐个股票串行，慢到实际不可用。
+    qlib.init(provider_uri=data_cfg["provider_uri"], region=REGION)
 
     # 构建数据集（所有模型共享同一数据集）
     dataset_config = get_dataset_config(data_cfg, handler=args.handler)
