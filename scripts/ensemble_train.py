@@ -345,6 +345,7 @@ def main():
         "recorder_id": recorders[last_model_name].id,
         "ensemble": True,
         "ensemble_models": model_names,
+        "ensemble_recorders": {name: recorders[name].id for name in model_names},
         "timestamp": datetime.now().isoformat(),
     }
     # 备份原始 train_info

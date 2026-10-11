@@ -124,7 +124,12 @@ def get_available_stocks(stock_list, cfg):
 
 
 def load_trained_model():
-    """从最新的训练信息中加载模型。"""
+    """从最新的训练信息中加载模型。
+
+    支持单模型与集成模型：
+    - 单模型：train_info.json 无 ensemble_recorders → 加载 recorder_id
+    - 集成：train_info.json 含 ensemble_recorders → 加载全部并返回 EnsembleModel
+    """
     info_path = REPORTS_DIR / "train_info.json"
     if not info_path.exists():
         print("错误: 未找到训练信息。请先运行 train.py")
@@ -135,41 +140,59 @@ def load_trained_model():
 
     from qlib.workflow import R
 
+    # ── 集成模式 ──
+    if train_info.get("ensemble_recorders"):
+        models = []
+        for name, rid in train_info["ensemble_recorders"].items():
+            rec = _get_recorder_with_fallback(rid, train_info.get("experiment_name"))
+            models.append((name, rec.load_object("params.pkl")))
+            print(f"[ensemble] 已加载模型: {name} (recorder={rid})")
+        model = EnsembleModel(models)
+        print(f"[ensemble] 集成 {len(models)} 个模型: {[n for n, _ in models]}")
+        return model, train_info
+
     recorder_id = train_info["recorder_id"]
     experiment_name = train_info.get("experiment_name")
 
-    # 尝试用 experiment_name 加载
-    try:
-        recorder = R.get_recorder(
-            recorder_id=recorder_id,
-            experiment_name=experiment_name,
-        )
-    except (ValueError, Exception):
-        # experiment_name 可能与 MLflow 不匹配，遍历所有实验查找 recorder
-        print(f"[warn] experiment_name='{experiment_name}' 未找到，遍历所有实验查找 recorder_id={recorder_id}")
-        recorder = None
-        try:
-            exp_manager = R.exp_manager
-            for exp in exp_manager.list_experiments():
-                try:
-                    r = R.get_recorder(recorder_id=recorder_id, experiment_name=exp.name)
-                    recorder = r
-                    print(f"[info] 在实验 '{exp.name}' (ID={exp.id}) 中找到 recorder")
-                    # 修复 train_info.json 中的 experiment_name
-                    train_info["experiment_name"] = exp.name
-                    break
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        if recorder is None:
-            raise ValueError(
-                f"无法找到 recorder_id={recorder_id}，"
-                f"experiment_name='{experiment_name}' 无效。请检查 mlruns/ 目录。"
-            )
+    recorder = _get_recorder_with_fallback(recorder_id, experiment_name)
 
     model = recorder.load_object("params.pkl")
     return model, train_info
+
+
+def _get_recorder_with_fallback(recorder_id, experiment_name):
+    """按 experiment_name 加载 recorder，失败时遍历所有实验查找。"""
+    from qlib.workflow import R
+
+    try:
+        return R.get_recorder(recorder_id=recorder_id, experiment_name=experiment_name)
+    except (ValueError, Exception):
+        print(f"[warn] experiment_name='{experiment_name}' 未找到，遍历所有实验查找 recorder_id={recorder_id}")
+        exp_manager = R.exp_manager
+        for exp in exp_manager.list_experiments():
+            try:
+                return R.get_recorder(recorder_id=recorder_id, experiment_name=exp.name)
+            except Exception:
+                continue
+        raise ValueError(
+            f"无法找到 recorder_id={recorder_id}，experiment_name='{experiment_name}' 无效。请检查 mlruns/ 目录。"
+        )
+
+
+class EnsembleModel:
+    """多模型预测平均（qlib AverageEnsemble 的推理期等价实现）。"""
+
+    def __init__(self, models):
+        self.models = models
+
+    def predict(self, dataset):
+        import pandas as pd
+
+        preds = [m.predict(dataset) for _, m in self.models]
+        combined = pd.concat(preds, axis=1).mean(axis=1)
+        combined.name = "score"
+        return combined
+
 
 
 def predict_for_stocks(model, stock_codes_qlib, cfg, handler="alpha158"):
