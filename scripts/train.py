@@ -32,7 +32,7 @@ DATA_CONFIGS = {
         "valid_start": "2026-01-01",
         "valid_end": "2026-03-31",
         "test_start": "2026-04-01",
-        "test_end": "2026-09-03",
+        "test_end": "2026-10-08",
     },
     "cn_data": {
         "provider_uri": "~/.qlib/qlib_data/cn_data",
@@ -175,8 +175,8 @@ def main():
     parser.add_argument("--train-start", default=None, help="覆盖训练起始日期（如 2023-01-01）")
     parser.add_argument("--seed", type=int, default=42, help="随机种子（默认 42）")
     parser.add_argument("--seeds", type=int, default=1,
-                        help="多种子训练数量（默认 1。>1 时用 seed=[42..42+N-1] 各训一个模型，"
-                             "再用 ensemble_train.py 平均，对齐中金 STAR 文章 3 种子均值方法论）")
+                        help="多种子训练数量（默认 1。>1 时用 seed=[base..base+N-1] 各训一个模型，"
+                             "predict.py 加载全部并平均预测，对齐中金 STAR 文章种子均值方法论）")
     args = parser.parse_args()
 
     data_cfg = DATA_CONFIGS[args.data]
@@ -275,6 +275,7 @@ def main():
 
     dataset_config = get_dataset_config(data_cfg, train_end, valid_start, valid_end, test_start, test_end, handler=args.handler)
 
+    ensemble_recorders: dict[str, str] = {}
     for attempt, fallback_market in enumerate(FALLBACK_MARKETS):
         try:
             if attempt > 0:
@@ -285,7 +286,6 @@ def main():
                 print(f"\n[RETRY-{attempt}] 降级到 market={fallback_market or 'all'}...")
                 dataset_config = get_dataset_config(data_cfg_fb, train_end, valid_start, valid_end, test_start, test_end, handler=args.handler)
 
-            model = init_instance_by_config(model_config)
             dataset = init_instance_by_config(dataset_config)
 
             # Print dataset summary
@@ -297,28 +297,38 @@ def main():
             # Port analysis config
             port_config = get_port_analysis_config(test_start, test_end)
 
-            # Start experiment
-            experiment_name = f"train_{args.data}_{args.model}_s{args.seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            with R.start(experiment_name=experiment_name):
-                R.log_params(model=args.model, data_source=args.data, **flatten_dict({"model": model_config, "dataset": dataset_config}))
-                model.fit(dataset)
-                R.save_objects(**{"params.pkl": model})
+            # Multi-seed ensemble: train N models on the SAME dataset, collect recorders.
+            # Single dataset load, N fits — mirrors 中金 STAR "3-seed averaging".
+            n_seeds = max(1, args.seeds)
+            ensemble_recorders.clear()
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for si in range(n_seeds):
+                sd = args.seed + si
+                model_config = get_model_config(args.model, seed=sd)
+                model = init_instance_by_config(model_config)
+                experiment_name = f"train_{args.data}_{args.model}_s{sd}_{ts}"
+                with R.start(experiment_name=experiment_name):
+                    R.log_params(model=args.model, seed=sd, data_source=args.data,
+                                 **flatten_dict({"model": model_config, "dataset": dataset_config}))
+                    model.fit(dataset)
+                    R.save_objects(**{"params.pkl": model})
 
-                # Signal record
-                recorder = R.get_recorder()
-                sr = SignalRecord(model, dataset, recorder)
-                sr.generate()
+                    recorder = R.get_recorder()
+                    sr = SignalRecord(model, dataset, recorder)
+                    sr.generate()
+                    sar = SigAnaRecord(recorder)
+                    sar.generate()
 
-                # Signal analysis
-                sar = SigAnaRecord(recorder)
-                sar.generate()
+                    # Backtest only on first seed (expensive, seed-invariant enough)
+                    if si == 0:
+                        try:
+                            par = PortAnaRecord(recorder, port_config, "day")
+                            par.generate()
+                        except (ValueError, KeyError, IndexError) as e:
+                            print(f"[警告] 回测跳过: {e}")
 
-                # Backtest analysis
-                try:
-                    par = PortAnaRecord(recorder, port_config, "day")
-                    par.generate()
-                except (ValueError, KeyError, IndexError) as e:
-                    print(f"[警告] 回测跳过: {e}")
+                ensemble_recorders[f"{args.model}_s{sd}"] = recorder.id
+                print(f"[seed {sd}/{n_seeds}] recorder={recorder.id}")
 
             break  # Success — exit retry loop
 
@@ -349,6 +359,11 @@ def main():
         "recorder_id": recorder.id,
         "timestamp": datetime.now().isoformat(),
     }
+    if len(ensemble_recorders) > 1:
+        exp_info["ensemble"] = True
+        exp_info["ensemble_models"] = list(ensemble_recorders.keys())
+        exp_info["ensemble_recorders"] = ensemble_recorders
+        print(f"\n[MULTI-SEED] 集成 {len(ensemble_recorders)} 个模型: {list(ensemble_recorders.keys())}")
     info_path = REPORTS_DIR / "train_info.json"
     with open(info_path, "w", encoding="utf-8") as f:
         json.dump(exp_info, f, ensure_ascii=False, indent=2)
