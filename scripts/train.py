@@ -32,7 +32,7 @@ DATA_CONFIGS = {
         "valid_start": "2026-01-01",
         "valid_end": "2026-03-31",
         "test_start": "2026-04-01",
-        "test_end": "2026-10-08",
+        "test_end": "2026-10-09",
     },
     "cn_data": {
         "provider_uri": "~/.qlib/qlib_data/cn_data",
@@ -216,15 +216,11 @@ def main():
     # ── Memory-aware training with auto-retry ───────────────────────
     model_config = get_model_config(args.model, seed=args.seed)
 
-    # 多种子训练提示（--seed 单种子；--seeds N>1 通过 N 次 invocation + ensemble_train 实现）
+    # 多种子集成提示（--seeds N>1 在单进程内训练 N 个模型，共享同一数据集）
     if args.seeds > 1:
-        print(f"[MULTI-SEED] 检测到 --seeds {args.seeds}。本进程训练 seed={args.seed}；")
-        print(f"  多种子平均流程：")
-        for s in range(args.seed, args.seed + args.seeds):
-            print(f"    python scripts/train.py --data {args.data} --model {args.model} "
-                  f"--handler {args.handler} --seed {s}")
-        print(f"  然后用 ensemble_train.py 平均各 recorder 预测（与 lgbm/xgb/catboost 集成同机制）")
-        print(f"  本次先训练 seed={args.seed}...\n")
+        print(f"[MULTI-SEED] --seeds {args.seeds}: 将在单进程内训练 "
+              f"seed={args.seed}..{args.seed + args.seeds - 1} 共 {args.seeds} 个模型；")
+        print(f"  predict.py 会自动加载全部 recorder 并平均预测。\n")
 
     FALLBACK_MARKETS = [None, "csi800", "csi500", "csi300"]  # None = original market
     recorder = None
