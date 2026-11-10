@@ -308,21 +308,38 @@ def load_kronos_predictions(kronos_path: str | None) -> dict[str, dict]:
 
 
 def get_actual_prices(date: str, stocks: list[str]) -> dict[str, float]:
-    """从 tushare 获取指定日期的实际收盘价（不复权）。"""
+    """从 tushare 获取指定日期的实际收盘价（不复权）。
+
+    优先按 trade_date 拉取全市场后过滤：部分环境下 ``daily(ts_code=<逗号列表>)``
+    会返回空表（2026-11 起观测到），而 ``daily(trade_date=...)`` 稳定可用。
+    缺失的个别代码再逐只补齐，避免单点接口行为变化导致整批基准价为空。
+    """
     ts.set_token(TUSHARE_TOKEN)
     pro = ts.pro_api()
 
     date_fmt = date.replace('-', '')
+    wanted = set(stocks)
     price_map = {}
 
-    # tushare 一次最多查 100 只，分批
-    for i in range(0, len(stocks), 100):
-        batch = stocks[i:i+100]
-        ts_codes = ','.join(batch)
-        df = pro.daily(ts_code=ts_codes, start_date=date_fmt, end_date=date_fmt)
+    try:
+        df = pro.daily(trade_date=date_fmt)
         if df is not None and not df.empty:
             for _, row in df.iterrows():
-                price_map[row['ts_code']] = row['close']
+                if row['ts_code'] in wanted:
+                    price_map[row['ts_code']] = row['close']
+    except Exception as e:
+        print(f'[WARN] Tushare(trade_date={date}): {e}')
+
+    # 回退：逐只查询缺失代码（ts_code 批量查询在部分环境返回空）
+    for code in stocks:
+        if code in price_map:
+            continue
+        try:
+            one = pro.daily(ts_code=code, start_date=date_fmt, end_date=date_fmt)
+            if one is not None and not one.empty:
+                price_map[code] = one.iloc[0]['close']
+        except Exception as e:
+            print(f'[WARN] Tushare({code}): {e}')
 
     print(f'获取 {date} 收盘价: {len(price_map)}/{len(stocks)} 只')
     return price_map
